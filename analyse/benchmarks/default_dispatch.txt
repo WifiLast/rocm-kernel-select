@@ -1,0 +1,10 @@
+op         dtype    stock  default (patched)   ratio  picked
+conv2d     float16    1.428              1.462   0.98x  ['stock']
+conv2d     bfloat16    8.845              3.843   2.30x  ['ck']
+conv2d     float32    3.392              3.403   1.00x  ['stock']
+conv3d     float16    3.025              1.713   1.77x  ['ck']
+conv3d     bfloat16    3.076              1.737   1.77x  ['ck']
+conv3d     float32    6.453              6.294   1.03x  ['stock']
+group_norm float16   0.1665             0.1709   0.97x  ['native']
+group_norm bfloat16   0.1722             0.1661   1.04x  ['native']
+group_norm float32   0.2112             0.2052   1.03x  ['native']

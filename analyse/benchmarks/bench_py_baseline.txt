@@ -1,0 +1,45 @@
+[aiter] merge tuned file under model_configs/ and configs/ /mnt/data/miniconda3/envs/py310_amd/lib/python3.10/site-packages/aiter/configs/a8w8_bpreshuffle_tuned_gemm.csv:/mnt/data/miniconda3/envs/py310_amd/lib/python3.10/site-packages/aiter/configs/model_configs/a8w8_bpreshuffle_tuned_gemm_dsv3.csv
+[aiter] merge tuned file under model_configs/ and configs/ /mnt/data/miniconda3/envs/py310_amd/lib/python3.10/site-packages/aiter/configs/a8w8_blockscale_tuned_gemm.csv:/mnt/data/miniconda3/envs/py310_amd/lib/python3.10/site-packages/aiter/configs/model_configs/a8w8_blockscale_tuned_gemm_ds_v3.csv
+[aiter] merge tuned file under model_configs/ and configs/ /mnt/data/miniconda3/envs/py310_amd/lib/python3.10/site-packages/aiter/configs/a8w8_blockscale_bpreshuffle_tuned_gemm.csv:/mnt/data/miniconda3/envs/py310_amd/lib/python3.10/site-packages/aiter/configs/model_configs/a8w8_blockscale_bpreshuffle_tuned_gemm_dsv3.csv
+[aiter] import [module_aiter_enum] under /mnt/data/miniconda3/envs/py310_amd/lib/python3.10/site-packages/aiter/jit/module_aiter_enum.so
+
+==================== Running Benchmarks for FP16 ====================
+[Skip] Linear/BMM/Linear(int8): aiter not installed
+Op: Conv2d [N=64, C_in=128, C_out=64, 128x128, k=3]
+  Stock         :    1.422 ms, Avg Power:  67.08 W
+  amd_tuned_torch       :    9.087 ms, Avg Power:  68.07 W
+  Speedup       :     0.16 x
+Op: Conv3d [N=1, C_in=512, C_out=512, 8x32x32, k=3]
+  Stock         :    2.991 ms, Avg Power:  67.24 W
+  amd_tuned_torch       :    6.462 ms, Avg Power:  68.83 W
+  Speedup       :     0.46 x
+Op: GroupNorm [N=32, C=128, 64x64, groups=32]
+  Stock         :    0.259 ms, Avg Power:  67.37 W
+  amd_tuned_torch       :    0.192 ms, Avg Power:  67.37 W
+  Speedup       :     1.35 x
+[Skip] attention/layer_norm/rms_norm/gelu/silu: TransformerEngine not installed
+
+==================== Running Benchmarks for BF16 ====================
+[Skip] Linear/BMM/Linear(int8): aiter not installed
+[Skip] Conv2d/Conv3d: native HIP kernels don't cover BF16
+Op: GroupNorm [N=32, C=128, 64x64, groups=32]
+  Stock         :    0.223 ms, Avg Power:  67.37 W
+  amd_tuned_torch       :    0.194 ms, Avg Power:  67.37 W
+  Speedup       :     1.15 x
+[Skip] attention/layer_norm/rms_norm/gelu/silu: TransformerEngine not installed
+
+==================== Running Benchmarks for FP32 ====================
+[Skip] Linear/BMM/Linear(int8): aiter not installed
+Op: Conv2d [N=64, C_in=128, C_out=64, 128x128, k=3]
+  Stock         :    3.364 ms, Avg Power:  67.93 W
+  amd_tuned_torch       :   22.807 ms, Avg Power:  67.47 W
+  Speedup       :     0.15 x
+Op: Conv3d [N=1, C_in=512, C_out=512, 8x32x32, k=3]
+  Stock         :    6.417 ms, Avg Power:  68.07 W
+  amd_tuned_torch       :    6.819 ms, Avg Power:  69.13 W
+  Speedup       :     0.94 x
+Op: GroupNorm [N=32, C=128, 64x64, groups=32]
+  Stock         :    0.226 ms, Avg Power:  68.40 W
+  amd_tuned_torch       :    0.209 ms, Avg Power:  68.40 W
+  Speedup       :     1.08 x
+[Skip] attention/layer_norm/rms_norm/gelu/silu: TransformerEngine not installed

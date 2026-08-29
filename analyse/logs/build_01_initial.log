@@ -1,0 +1,17 @@
+Obtaining file:///mnt/data/optimization/amd_tools/source/cmp_ext_turing
+  Checking if build backend supports build_editable: started
+  Checking if build backend supports build_editable: finished with status 'done'
+  Preparing editable metadata (pyproject.toml): started
+  Preparing editable metadata (pyproject.toml): finished with status 'done'
+Building wheels for collected packages: amd_tuned_torch
+  Building editable for amd_tuned_torch (pyproject.toml): started
+  Building editable for amd_tuned_torch (pyproject.toml): finished with status 'done'
+  Created wheel for amd_tuned_torch: filename=amd_tuned_torch-0.2.0-0.editable-cp310-cp310-linux_x86_64.whl size=2929 sha256=26bfbee9445b0b64bdbcb7a272cda25c8a22258710bdafa273e758b07b95f81a
+  Stored in directory: /tmp/pip-ephem-wheel-cache-84ezpx34/wheels/af/df/7d/c3ecb14c170ae5e10c6d6310d07a0236687fdc0656a3b3a7ea
+Successfully built amd_tuned_torch
+Installing collected packages: amd_tuned_torch
+  Attempting uninstall: amd_tuned_torch
+    Found existing installation: amd_tuned_torch 0.2.0
+    Uninstalling amd_tuned_torch-0.2.0:
+      Successfully uninstalled amd_tuned_torch-0.2.0
+Successfully installed amd_tuned_torch-0.2.0

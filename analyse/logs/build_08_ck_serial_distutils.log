@@ -1,0 +1,334 @@
+Using pip 26.2.1 from /mnt/data/miniconda3/envs/py310_amd/lib/python3.10/site-packages/pip (python 3.10)
+Obtaining file:///mnt/data/optimization/amd_tools/source/cmp_ext_turing
+  Checking if build backend supports build_editable: started
+  Running command Checking if build backend supports build_editable
+  Checking if build backend supports build_editable: finished with status 'done'
+  Preparing editable metadata (pyproject.toml): started
+  Running command Preparing editable metadata (pyproject.toml)
+  OMP: Info #155: KMP_AFFINITY: Initial OS proc set respected: 0-7
+  OMP: Info #216: KMP_AFFINITY: decoding x2APIC ids.
+  OMP: Info #157: KMP_AFFINITY: 8 available OS procs
+  OMP: Info #158: KMP_AFFINITY: Uniform topology
+  OMP: Info #289: KMP_AFFINITY: topology layer "LL cache" is equivalent to "socket".
+  OMP: Info #289: KMP_AFFINITY: topology layer "L3 cache" is equivalent to "socket".
+  OMP: Info #289: KMP_AFFINITY: topology layer "L2 cache" is equivalent to "core".
+  OMP: Info #289: KMP_AFFINITY: topology layer "L1 cache" is equivalent to "core".
+  OMP: Info #191: KMP_AFFINITY: 1 socket x 4 cores/socket x 2 threads/core (4 total cores)
+  OMP: Info #218: KMP_AFFINITY: OS proc to physical thread map:
+  OMP: Info #172: KMP_AFFINITY: OS proc 0 maps to socket 0 core 0 thread 0
+  OMP: Info #172: KMP_AFFINITY: OS proc 4 maps to socket 0 core 0 thread 1
+  OMP: Info #172: KMP_AFFINITY: OS proc 1 maps to socket 0 core 1 thread 2
+  OMP: Info #172: KMP_AFFINITY: OS proc 5 maps to socket 0 core 1 thread 3
+  OMP: Info #172: KMP_AFFINITY: OS proc 2 maps to socket 0 core 2 thread 4
+  OMP: Info #172: KMP_AFFINITY: OS proc 6 maps to socket 0 core 2 thread 5
+  OMP: Info #172: KMP_AFFINITY: OS proc 3 maps to socket 0 core 3 thread 6
+  OMP: Info #172: KMP_AFFINITY: OS proc 7 maps to socket 0 core 3 thread 7
+  OMP: Info #254: KMP_AFFINITY: pid 73417 tid 73417 thread 0 bound to OS proc set 0
+  setup.py: Composable Kernel conv tier ENABLED (CK at /mnt/data/optimization/amd_tools/source/cmp_ext_turing/../../../composable_kernel)
+  /mnt/data/optimization/amd_tools/source/cmp_ext_turing/src/cuda/group_norm.cu -> /mnt/data/optimization/amd_tools/source/cmp_ext_turing/src/hip/group_norm.hip [ok]
+  /mnt/data/optimization/amd_tools/source/cmp_ext_turing/src/cuda/conv2d_fp32.cu -> /mnt/data/optimization/amd_tools/source/cmp_ext_turing/src/hip/conv2d_fp32.hip [ok]
+  /mnt/data/optimization/amd_tools/source/cmp_ext_turing/src/cuda/conv3d_fp32.cu -> /mnt/data/optimization/amd_tools/source/cmp_ext_turing/src/hip/conv3d_fp32.hip [ok]
+  /mnt/data/optimization/amd_tools/source/cmp_ext_turing/src/cuda/conv3d_fp32_winograd.cu -> /mnt/data/optimization/amd_tools/source/cmp_ext_turing/src/hip/conv3d_fp32_winograd.hip [ok]
+  /mnt/data/optimization/amd_tools/source/cmp_ext_turing/src/dispatch_common.h -> /mnt/data/optimization/amd_tools/source/cmp_ext_turing/src/dispatch_common.h [skipped, no changes]
+  /mnt/data/optimization/amd_tools/source/cmp_ext_turing/src/ck_conv_torch.hpp -> /mnt/data/optimization/amd_tools/source/cmp_ext_turing/src/ck_conv_torch.hpp [skipped, no changes]
+  /mnt/data/optimization/amd_tools/source/cmp_ext_turing/src/main_rocm.cpp -> /mnt/data/optimization/amd_tools/source/cmp_ext_turing/src/main_rocm_hip.cpp [ok]
+  /mnt/data/optimization/amd_tools/source/cmp_ext_turing/src/cuda/generated/conv2d_fp16_bm128_bn128_bk32_s3.cu -> /mnt/data/optimization/amd_tools/source/cmp_ext_turing/src/hip/generated/conv2d_fp16_bm128_bn128_bk32_s3.hip [ok]
+  /mnt/data/optimization/amd_tools/source/cmp_ext_turing/src/cuda/generated/conv2d_fp16_bm256_bn128_bk32_s2.cu -> /mnt/data/optimization/amd_tools/source/cmp_ext_turing/src/hip/generated/conv2d_fp16_bm256_bn128_bk32_s2.hip [ok]
+  /mnt/data/optimization/amd_tools/source/cmp_ext_turing/src/cuda/generated/conv2d_fp16_bm256_bn64_bk32_s2.cu -> /mnt/data/optimization/amd_tools/source/cmp_ext_turing/src/hip/generated/conv2d_fp16_bm256_bn64_bk32_s2.hip [ok]
+  /mnt/data/optimization/amd_tools/source/cmp_ext_turing/src/cuda/generated/conv3d_fp16_bm256_bn128_bk32_s2.cu -> /mnt/data/optimization/amd_tools/source/cmp_ext_turing/src/hip/generated/conv3d_fp16_bm256_bn128_bk32_s2.hip [ok]
+  /mnt/data/optimization/amd_tools/source/cmp_ext_turing/src/cuda/generated/conv3d_fp16_winograd_bt8_bc8.cu -> /mnt/data/optimization/amd_tools/source/cmp_ext_turing/src/hip/generated/conv3d_fp16_winograd_bt8_bc8.hip [ok]
+  /mnt/data/optimization/amd_tools/source/cmp_ext_turing/src/cuda/ck_conv_fwd.hpp -> /mnt/data/optimization/amd_tools/source/cmp_ext_turing/src/hip/ck_conv_fwd.hpp [ok]
+  /mnt/data/optimization/amd_tools/source/cmp_ext_turing/src/cuda/ck_conv_fwd_tu.hpp -> /mnt/data/optimization/amd_tools/source/cmp_ext_turing/src/hip/ck_conv_fwd_tu.hpp [ok]
+  /mnt/data/optimization/amd_tools/source/cmp_ext_turing/src/cuda/ck_conv_fwd.cu -> /mnt/data/optimization/amd_tools/source/cmp_ext_turing/src/hip/ck_conv_fwd.hip [ok]
+  /mnt/data/optimization/amd_tools/source/cmp_ext_turing/src/cuda/ck_conv_fwd_impl.hpp -> /mnt/data/optimization/amd_tools/source/cmp_ext_turing/src/hip/ck_conv_fwd_impl.hpp [ok]
+  /mnt/data/optimization/amd_tools/source/cmp_ext_turing/src/cuda/ck_conv_fwd_2d_f16.cu -> /mnt/data/optimization/amd_tools/source/cmp_ext_turing/src/hip/ck_conv_fwd_2d_f16.hip [ok]
+  /mnt/data/optimization/amd_tools/source/cmp_ext_turing/src/cuda/ck_conv_fwd_2d_bf16.cu -> /mnt/data/optimization/amd_tools/source/cmp_ext_turing/src/hip/ck_conv_fwd_2d_bf16.hip [ok]
+  /mnt/data/optimization/amd_tools/source/cmp_ext_turing/src/cuda/ck_conv_fwd_3d_f16.cu -> /mnt/data/optimization/amd_tools/source/cmp_ext_turing/src/hip/ck_conv_fwd_3d_f16.hip [ok]
+  /mnt/data/optimization/amd_tools/source/cmp_ext_turing/src/cuda/ck_conv_fwd_3d_bf16.cu -> /mnt/data/optimization/amd_tools/source/cmp_ext_turing/src/hip/ck_conv_fwd_3d_bf16.hip [ok]
+  /mnt/data/optimization/amd_tools/source/cmp_ext_turing/src/ck_conv_torch.cpp -> /mnt/data/optimization/amd_tools/source/cmp_ext_turing/src/ck_conv_torch_hip.cpp [ok]
+  [92mSuccessfully preprocessed all matching files.[0m
+  Total number of unsupported CUDA function calls: 0
+
+
+  Total number of replaced kernel launches: 0
+  running dist_info
+  creating /tmp/pip-modern-metadata-kmhzgdmj/amd_tuned_torch.egg-info
+  writing /tmp/pip-modern-metadata-kmhzgdmj/amd_tuned_torch.egg-info/PKG-INFO
+  writing dependency_links to /tmp/pip-modern-metadata-kmhzgdmj/amd_tuned_torch.egg-info/dependency_links.txt
+  writing top-level names to /tmp/pip-modern-metadata-kmhzgdmj/amd_tuned_torch.egg-info/top_level.txt
+  writing manifest file '/tmp/pip-modern-metadata-kmhzgdmj/amd_tuned_torch.egg-info/SOURCES.txt'
+  reading manifest file '/tmp/pip-modern-metadata-kmhzgdmj/amd_tuned_torch.egg-info/SOURCES.txt'
+  writing manifest file '/tmp/pip-modern-metadata-kmhzgdmj/amd_tuned_torch.egg-info/SOURCES.txt'
+  creating '/tmp/pip-modern-metadata-kmhzgdmj/amd_tuned_torch-0.2.0.dist-info'
+  Preparing editable metadata (pyproject.toml): finished with status 'done'
+Building wheels for collected packages: amd_tuned_torch
+  Building editable for amd_tuned_torch (pyproject.toml): started
+  Running command Building editable for amd_tuned_torch (pyproject.toml)
+  OMP: Info #155: KMP_AFFINITY: Initial OS proc set respected: 0-7
+  OMP: Info #216: KMP_AFFINITY: decoding x2APIC ids.
+  OMP: Info #157: KMP_AFFINITY: 8 available OS procs
+  OMP: Info #158: KMP_AFFINITY: Uniform topology
+  OMP: Info #289: KMP_AFFINITY: topology layer "LL cache" is equivalent to "socket".
+  OMP: Info #289: KMP_AFFINITY: topology layer "L3 cache" is equivalent to "socket".
+  OMP: Info #289: KMP_AFFINITY: topology layer "L2 cache" is equivalent to "core".
+  OMP: Info #289: KMP_AFFINITY: topology layer "L1 cache" is equivalent to "core".
+  OMP: Info #191: KMP_AFFINITY: 1 socket x 4 cores/socket x 2 threads/core (4 total cores)
+  OMP: Info #218: KMP_AFFINITY: OS proc to physical thread map:
+  OMP: Info #172: KMP_AFFINITY: OS proc 0 maps to socket 0 core 0 thread 0
+  OMP: Info #172: KMP_AFFINITY: OS proc 4 maps to socket 0 core 0 thread 1
+  OMP: Info #172: KMP_AFFINITY: OS proc 1 maps to socket 0 core 1 thread 2
+  OMP: Info #172: KMP_AFFINITY: OS proc 5 maps to socket 0 core 1 thread 3
+  OMP: Info #172: KMP_AFFINITY: OS proc 2 maps to socket 0 core 2 thread 4
+  OMP: Info #172: KMP_AFFINITY: OS proc 6 maps to socket 0 core 2 thread 5
+  OMP: Info #172: KMP_AFFINITY: OS proc 3 maps to socket 0 core 3 thread 6
+  OMP: Info #172: KMP_AFFINITY: OS proc 7 maps to socket 0 core 3 thread 7
+  OMP: Info #254: KMP_AFFINITY: pid 73437 tid 73437 thread 0 bound to OS proc set 0
+  setup.py: Composable Kernel conv tier ENABLED (CK at /mnt/data/optimization/amd_tools/source/cmp_ext_turing/../../../composable_kernel)
+  /mnt/data/optimization/amd_tools/source/cmp_ext_turing/src/cuda/group_norm.cu -> /mnt/data/optimization/amd_tools/source/cmp_ext_turing/src/hip/group_norm.hip [skipped, already hipified]
+  /mnt/data/optimization/amd_tools/source/cmp_ext_turing/src/cuda/conv2d_fp32.cu -> /mnt/data/optimization/amd_tools/source/cmp_ext_turing/src/hip/conv2d_fp32.hip [skipped, already hipified]
+  /mnt/data/optimization/amd_tools/source/cmp_ext_turing/src/cuda/conv3d_fp32.cu -> /mnt/data/optimization/amd_tools/source/cmp_ext_turing/src/hip/conv3d_fp32.hip [skipped, already hipified]
+  /mnt/data/optimization/amd_tools/source/cmp_ext_turing/src/cuda/conv3d_fp32_winograd.cu -> /mnt/data/optimization/amd_tools/source/cmp_ext_turing/src/hip/conv3d_fp32_winograd.hip [skipped, already hipified]
+  /mnt/data/optimization/amd_tools/source/cmp_ext_turing/src/dispatch_common.h -> /mnt/data/optimization/amd_tools/source/cmp_ext_turing/src/dispatch_common.h [skipped, no changes]
+  /mnt/data/optimization/amd_tools/source/cmp_ext_turing/src/ck_conv_torch.hpp -> /mnt/data/optimization/amd_tools/source/cmp_ext_turing/src/ck_conv_torch.hpp [skipped, no changes]
+  /mnt/data/optimization/amd_tools/source/cmp_ext_turing/src/main_rocm.cpp -> /mnt/data/optimization/amd_tools/source/cmp_ext_turing/src/main_rocm_hip.cpp [skipped, already hipified]
+  /mnt/data/optimization/amd_tools/source/cmp_ext_turing/src/cuda/generated/conv2d_fp16_bm128_bn128_bk32_s3.cu -> /mnt/data/optimization/amd_tools/source/cmp_ext_turing/src/hip/generated/conv2d_fp16_bm128_bn128_bk32_s3.hip [skipped, already hipified]
+  /mnt/data/optimization/amd_tools/source/cmp_ext_turing/src/cuda/generated/conv2d_fp16_bm256_bn128_bk32_s2.cu -> /mnt/data/optimization/amd_tools/source/cmp_ext_turing/src/hip/generated/conv2d_fp16_bm256_bn128_bk32_s2.hip [skipped, already hipified]
+  /mnt/data/optimization/amd_tools/source/cmp_ext_turing/src/cuda/generated/conv2d_fp16_bm256_bn64_bk32_s2.cu -> /mnt/data/optimization/amd_tools/source/cmp_ext_turing/src/hip/generated/conv2d_fp16_bm256_bn64_bk32_s2.hip [skipped, already hipified]
+  /mnt/data/optimization/amd_tools/source/cmp_ext_turing/src/cuda/generated/conv3d_fp16_bm256_bn128_bk32_s2.cu -> /mnt/data/optimization/amd_tools/source/cmp_ext_turing/src/hip/generated/conv3d_fp16_bm256_bn128_bk32_s2.hip [skipped, already hipified]
+  /mnt/data/optimization/amd_tools/source/cmp_ext_turing/src/cuda/generated/conv3d_fp16_winograd_bt8_bc8.cu -> /mnt/data/optimization/amd_tools/source/cmp_ext_turing/src/hip/generated/conv3d_fp16_winograd_bt8_bc8.hip [skipped, already hipified]
+  /mnt/data/optimization/amd_tools/source/cmp_ext_turing/src/cuda/ck_conv_fwd.hpp -> /mnt/data/optimization/amd_tools/source/cmp_ext_turing/src/hip/ck_conv_fwd.hpp [skipped, already hipified]
+  /mnt/data/optimization/amd_tools/source/cmp_ext_turing/src/cuda/ck_conv_fwd_tu.hpp -> /mnt/data/optimization/amd_tools/source/cmp_ext_turing/src/hip/ck_conv_fwd_tu.hpp [skipped, already hipified]
+  /mnt/data/optimization/amd_tools/source/cmp_ext_turing/src/cuda/ck_conv_fwd.cu -> /mnt/data/optimization/amd_tools/source/cmp_ext_turing/src/hip/ck_conv_fwd.hip [skipped, already hipified]
+  /mnt/data/optimization/amd_tools/source/cmp_ext_turing/src/cuda/ck_conv_fwd_impl.hpp -> /mnt/data/optimization/amd_tools/source/cmp_ext_turing/src/hip/ck_conv_fwd_impl.hpp [skipped, already hipified]
+  /mnt/data/optimization/amd_tools/source/cmp_ext_turing/src/cuda/ck_conv_fwd_2d_f16.cu -> /mnt/data/optimization/amd_tools/source/cmp_ext_turing/src/hip/ck_conv_fwd_2d_f16.hip [skipped, already hipified]
+  /mnt/data/optimization/amd_tools/source/cmp_ext_turing/src/cuda/ck_conv_fwd_2d_bf16.cu -> /mnt/data/optimization/amd_tools/source/cmp_ext_turing/src/hip/ck_conv_fwd_2d_bf16.hip [skipped, already hipified]
+  /mnt/data/optimization/amd_tools/source/cmp_ext_turing/src/cuda/ck_conv_fwd_3d_f16.cu -> /mnt/data/optimization/amd_tools/source/cmp_ext_turing/src/hip/ck_conv_fwd_3d_f16.hip [skipped, already hipified]
+  /mnt/data/optimization/amd_tools/source/cmp_ext_turing/src/cuda/ck_conv_fwd_3d_bf16.cu -> /mnt/data/optimization/amd_tools/source/cmp_ext_turing/src/hip/ck_conv_fwd_3d_bf16.hip [skipped, already hipified]
+  /mnt/data/optimization/amd_tools/source/cmp_ext_turing/src/ck_conv_torch.cpp -> /mnt/data/optimization/amd_tools/source/cmp_ext_turing/src/ck_conv_torch_hip.cpp [skipped, already hipified]
+  [92mSuccessfully preprocessed all matching files.[0m
+  Total number of unsupported CUDA function calls: 0
+
+
+  Total number of replaced kernel launches: 0
+  running editable_wheel
+  creating /tmp/pip-ephem-wheel-cache-1s8fx8x2/wheels/af/df/7d/c3ecb14c170ae5e10c6d6310d07a0236687fdc0656a3b3a7ea/tmp9asiv2ny/.tmp-abv8vknj/amd_tuned_torch.egg-info
+  writing /tmp/pip-ephem-wheel-cache-1s8fx8x2/wheels/af/df/7d/c3ecb14c170ae5e10c6d6310d07a0236687fdc0656a3b3a7ea/tmp9asiv2ny/.tmp-abv8vknj/amd_tuned_torch.egg-info/PKG-INFO
+  writing dependency_links to /tmp/pip-ephem-wheel-cache-1s8fx8x2/wheels/af/df/7d/c3ecb14c170ae5e10c6d6310d07a0236687fdc0656a3b3a7ea/tmp9asiv2ny/.tmp-abv8vknj/amd_tuned_torch.egg-info/dependency_links.txt
+  writing top-level names to /tmp/pip-ephem-wheel-cache-1s8fx8x2/wheels/af/df/7d/c3ecb14c170ae5e10c6d6310d07a0236687fdc0656a3b3a7ea/tmp9asiv2ny/.tmp-abv8vknj/amd_tuned_torch.egg-info/top_level.txt
+  writing manifest file '/tmp/pip-ephem-wheel-cache-1s8fx8x2/wheels/af/df/7d/c3ecb14c170ae5e10c6d6310d07a0236687fdc0656a3b3a7ea/tmp9asiv2ny/.tmp-abv8vknj/amd_tuned_torch.egg-info/SOURCES.txt'
+  reading manifest file '/tmp/pip-ephem-wheel-cache-1s8fx8x2/wheels/af/df/7d/c3ecb14c170ae5e10c6d6310d07a0236687fdc0656a3b3a7ea/tmp9asiv2ny/.tmp-abv8vknj/amd_tuned_torch.egg-info/SOURCES.txt'
+  writing manifest file '/tmp/pip-ephem-wheel-cache-1s8fx8x2/wheels/af/df/7d/c3ecb14c170ae5e10c6d6310d07a0236687fdc0656a3b3a7ea/tmp9asiv2ny/.tmp-abv8vknj/amd_tuned_torch.egg-info/SOURCES.txt'
+  creating '/tmp/pip-ephem-wheel-cache-1s8fx8x2/wheels/af/df/7d/c3ecb14c170ae5e10c6d6310d07a0236687fdc0656a3b3a7ea/tmp9asiv2ny/.tmp-abv8vknj/amd_tuned_torch-0.2.0.dist-info'
+  creating /tmp/pip-ephem-wheel-cache-1s8fx8x2/wheels/af/df/7d/c3ecb14c170ae5e10c6d6310d07a0236687fdc0656a3b3a7ea/tmp9asiv2ny/.tmp-abv8vknj/amd_tuned_torch-0.2.0.dist-info/WHEEL
+  running build_ext
+  building 'amd_tuned_torch._native' extension
+  creating /tmp/tmp5vzcaog4.build-temp/src
+  creating /tmp/tmp5vzcaog4.build-temp/src/hip
+  creating /tmp/tmp5vzcaog4.build-temp/src/hip/generated
+  /opt/rocm/bin/amdclang++ -O2 -fPIC -fPIC -I/mnt/data/optimization/composable_kernel/include -I/mnt/data/optimization/composable_kernel/library/include -I/mnt/data/optimization/amd_tools/source/cmp_ext_turing/src -I/mnt/data/optimization/amd_tools/source/cmp_ext_turing/src/cuda -I/mnt/data/miniconda3/envs/py310_amd/lib/python3.10/site-packages/torch/include -I/mnt/data/miniconda3/envs/py310_amd/lib/python3.10/site-packages/torch/include/torch/csrc/api/include -I/mnt/data/miniconda3/envs/py310_amd/lib/python3.10/site-packages/torch/include/THH -I/opt/rocm/core-7.14/include -I/mnt/data/miniconda3/envs/py310/include/python3.10 -c src/ck_conv_torch_hip.cpp -o /tmp/tmp5vzcaog4.build-temp/src/ck_conv_torch_hip.o -D__HIP_PLATFORM_AMD__=1 -DUSE_ROCM=1 -DHIPBLAS_V2 -fPIC -O3 -DAMD_TUNED_TORCH_HAS_CK=1 -DCK_ENABLE_FP16=1 -DCK_ENABLE_BF16=1 -DTORCH_API_INCLUDE_EXTENSION_H -DTORCH_EXTENSION_NAME=_native -std=c++20
+  /opt/rocm/core-7.14/bin/hipcc -I/mnt/data/optimization/composable_kernel/include -I/mnt/data/optimization/composable_kernel/library/include -I/mnt/data/optimization/amd_tools/source/cmp_ext_turing/src -I/mnt/data/optimization/amd_tools/source/cmp_ext_turing/src/cuda -I/mnt/data/miniconda3/envs/py310_amd/lib/python3.10/site-packages/torch/include -I/mnt/data/miniconda3/envs/py310_amd/lib/python3.10/site-packages/torch/include/torch/csrc/api/include -I/mnt/data/miniconda3/envs/py310_amd/lib/python3.10/site-packages/torch/include/THH -I/opt/rocm/core-7.14/include -I/mnt/data/miniconda3/envs/py310/include/python3.10 -c src/hip/ck_conv_fwd.hip -o /tmp/tmp5vzcaog4.build-temp/src/hip/ck_conv_fwd.o -D__HIP_PLATFORM_AMD__=1 -DUSE_ROCM=1 -DHIPBLAS_V2 -fPIC -DCUDA_HAS_FP16=1 -D__HIP_NO_HALF_OPERATORS__=1 -D__HIP_NO_HALF_CONVERSIONS__=1 -DHIP_ENABLE_WARP_SYNC_BUILTINS=1 -O3 --offload-arch=gfx1100 -U__HIP_NO_HALF_CONVERSIONS__ -DAMD_TUNED_TORCH_HAS_CK=1 -DCK_ENABLE_FP16=1 -DCK_ENABLE_BF16=1 -DTORCH_API_INCLUDE_EXTENSION_H -DTORCH_EXTENSION_NAME=_native -fno-gpu-rdc -std=c++20
+  /opt/rocm/core-7.14/bin/hipcc -I/mnt/data/optimization/composable_kernel/include -I/mnt/data/optimization/composable_kernel/library/include -I/mnt/data/optimization/amd_tools/source/cmp_ext_turing/src -I/mnt/data/optimization/amd_tools/source/cmp_ext_turing/src/cuda -I/mnt/data/miniconda3/envs/py310_amd/lib/python3.10/site-packages/torch/include -I/mnt/data/miniconda3/envs/py310_amd/lib/python3.10/site-packages/torch/include/torch/csrc/api/include -I/mnt/data/miniconda3/envs/py310_amd/lib/python3.10/site-packages/torch/include/THH -I/opt/rocm/core-7.14/include -I/mnt/data/miniconda3/envs/py310/include/python3.10 -c src/hip/ck_conv_fwd_2d_bf16.hip -o /tmp/tmp5vzcaog4.build-temp/src/hip/ck_conv_fwd_2d_bf16.o -D__HIP_PLATFORM_AMD__=1 -DUSE_ROCM=1 -DHIPBLAS_V2 -fPIC -DCUDA_HAS_FP16=1 -D__HIP_NO_HALF_OPERATORS__=1 -D__HIP_NO_HALF_CONVERSIONS__=1 -DHIP_ENABLE_WARP_SYNC_BUILTINS=1 -O3 --offload-arch=gfx1100 -U__HIP_NO_HALF_CONVERSIONS__ -DAMD_TUNED_TORCH_HAS_CK=1 -DCK_ENABLE_FP16=1 -DCK_ENABLE_BF16=1 -DTORCH_API_INCLUDE_EXTENSION_H -DTORCH_EXTENSION_NAME=_native -fno-gpu-rdc -std=c++20
+  In file included from src/hip/ck_conv_fwd_2d_bf16.hip:5:
+  In file included from src/hip/../hip/ck_conv_fwd_impl.hpp:28:
+  In file included from /mnt/data/optimization/composable_kernel/include/ck/tensor_operation/gpu/element/element_wise_operation.hpp:6:
+  In file included from /mnt/data/optimization/composable_kernel/include/ck/utility/data_type.hpp:10:
+  In file included from /mnt/data/optimization/composable_kernel/include/ck/utility/statically_indexed_array.hpp:7:
+  In file included from /mnt/data/optimization/composable_kernel/include/ck/utility/functional2.hpp:8:
+  /mnt/data/optimization/composable_kernel/include/ck/utility/tuple.hpp:15:34: warning: unknown warning group '-Wlifetime-safety-lifetimebound-violation', ignored [-Wunknown-warning-option]
+     15 | #pragma clang diagnostic ignored "-Wlifetime-safety-lifetimebound-violation"
+        |                                  ^
+  In file included from src/hip/ck_conv_fwd_2d_bf16.hip:5:
+  In file included from src/hip/../hip/ck_conv_fwd_impl.hpp:28:
+  In file included from /mnt/data/optimization/composable_kernel/include/ck/tensor_operation/gpu/element/element_wise_operation.hpp:7:
+  In file included from /mnt/data/optimization/composable_kernel/include/ck/utility/math_v2.hpp:12:
+  In file included from /mnt/data/optimization/composable_kernel/include/ck/utility/type_convert.hpp:9:
+  In file included from /mnt/data/optimization/composable_kernel/include/ck/utility/mxf4_utils.hpp:9:
+  /mnt/data/optimization/composable_kernel/include/ck/utility/dtype_vector.hpp:11:34: warning: unknown warning group '-Wlifetime-safety-lifetimebound-violation', ignored [-Wunknown-warning-option]
+     11 | #pragma clang diagnostic ignored "-Wlifetime-safety-lifetimebound-violation"
+        |                                  ^
+  2 warnings generated when compiling for gfx1100.
+  In file included from src/hip/ck_conv_fwd_2d_bf16.hip:5:
+  In file included from src/hip/../hip/ck_conv_fwd_impl.hpp:28:
+  In file included from /mnt/data/optimization/composable_kernel/include/ck/tensor_operation/gpu/element/element_wise_operation.hpp:6:
+  In file included from /mnt/data/optimization/composable_kernel/include/ck/utility/data_type.hpp:10:
+  In file included from /mnt/data/optimization/composable_kernel/include/ck/utility/statically_indexed_array.hpp:7:
+  In file included from /mnt/data/optimization/composable_kernel/include/ck/utility/functional2.hpp:8:
+  /mnt/data/optimization/composable_kernel/include/ck/utility/tuple.hpp:15:34: warning: unknown warning group '-Wlifetime-safety-lifetimebound-violation', ignored [-Wunknown-warning-option]
+     15 | #pragma clang diagnostic ignored "-Wlifetime-safety-lifetimebound-violation"
+        |                                  ^
+  In file included from src/hip/ck_conv_fwd_2d_bf16.hip:5:
+  In file included from src/hip/../hip/ck_conv_fwd_impl.hpp:28:
+  In file included from /mnt/data/optimization/composable_kernel/include/ck/tensor_operation/gpu/element/element_wise_operation.hpp:7:
+  In file included from /mnt/data/optimization/composable_kernel/include/ck/utility/math_v2.hpp:12:
+  In file included from /mnt/data/optimization/composable_kernel/include/ck/utility/type_convert.hpp:9:
+  In file included from /mnt/data/optimization/composable_kernel/include/ck/utility/mxf4_utils.hpp:9:
+  /mnt/data/optimization/composable_kernel/include/ck/utility/dtype_vector.hpp:11:34: warning: unknown warning group '-Wlifetime-safety-lifetimebound-violation', ignored [-Wunknown-warning-option]
+     11 | #pragma clang diagnostic ignored "-Wlifetime-safety-lifetimebound-violation"
+        |                                  ^
+  2 warnings generated when compiling for host.
+  /opt/rocm/core-7.14/bin/hipcc -I/mnt/data/optimization/composable_kernel/include -I/mnt/data/optimization/composable_kernel/library/include -I/mnt/data/optimization/amd_tools/source/cmp_ext_turing/src -I/mnt/data/optimization/amd_tools/source/cmp_ext_turing/src/cuda -I/mnt/data/miniconda3/envs/py310_amd/lib/python3.10/site-packages/torch/include -I/mnt/data/miniconda3/envs/py310_amd/lib/python3.10/site-packages/torch/include/torch/csrc/api/include -I/mnt/data/miniconda3/envs/py310_amd/lib/python3.10/site-packages/torch/include/THH -I/opt/rocm/core-7.14/include -I/mnt/data/miniconda3/envs/py310/include/python3.10 -c src/hip/ck_conv_fwd_2d_f16.hip -o /tmp/tmp5vzcaog4.build-temp/src/hip/ck_conv_fwd_2d_f16.o -D__HIP_PLATFORM_AMD__=1 -DUSE_ROCM=1 -DHIPBLAS_V2 -fPIC -DCUDA_HAS_FP16=1 -D__HIP_NO_HALF_OPERATORS__=1 -D__HIP_NO_HALF_CONVERSIONS__=1 -DHIP_ENABLE_WARP_SYNC_BUILTINS=1 -O3 --offload-arch=gfx1100 -U__HIP_NO_HALF_CONVERSIONS__ -DAMD_TUNED_TORCH_HAS_CK=1 -DCK_ENABLE_FP16=1 -DCK_ENABLE_BF16=1 -DTORCH_API_INCLUDE_EXTENSION_H -DTORCH_EXTENSION_NAME=_native -fno-gpu-rdc -std=c++20
+  In file included from src/hip/ck_conv_fwd_2d_f16.hip:5:
+  In file included from src/hip/../hip/ck_conv_fwd_impl.hpp:28:
+  In file included from /mnt/data/optimization/composable_kernel/include/ck/tensor_operation/gpu/element/element_wise_operation.hpp:6:
+  In file included from /mnt/data/optimization/composable_kernel/include/ck/utility/data_type.hpp:10:
+  In file included from /mnt/data/optimization/composable_kernel/include/ck/utility/statically_indexed_array.hpp:7:
+  In file included from /mnt/data/optimization/composable_kernel/include/ck/utility/functional2.hpp:8:
+  /mnt/data/optimization/composable_kernel/include/ck/utility/tuple.hpp:15:34: warning: unknown warning group '-Wlifetime-safety-lifetimebound-violation', ignored [-Wunknown-warning-option]
+     15 | #pragma clang diagnostic ignored "-Wlifetime-safety-lifetimebound-violation"
+        |                                  ^
+  In file included from src/hip/ck_conv_fwd_2d_f16.hip:5:
+  In file included from src/hip/../hip/ck_conv_fwd_impl.hpp:28:
+  In file included from /mnt/data/optimization/composable_kernel/include/ck/tensor_operation/gpu/element/element_wise_operation.hpp:7:
+  In file included from /mnt/data/optimization/composable_kernel/include/ck/utility/math_v2.hpp:12:
+  In file included from /mnt/data/optimization/composable_kernel/include/ck/utility/type_convert.hpp:9:
+  In file included from /mnt/data/optimization/composable_kernel/include/ck/utility/mxf4_utils.hpp:9:
+  /mnt/data/optimization/composable_kernel/include/ck/utility/dtype_vector.hpp:11:34: warning: unknown warning group '-Wlifetime-safety-lifetimebound-violation', ignored [-Wunknown-warning-option]
+     11 | #pragma clang diagnostic ignored "-Wlifetime-safety-lifetimebound-violation"
+        |                                  ^
+  2 warnings generated when compiling for gfx1100.
+  In file included from src/hip/ck_conv_fwd_2d_f16.hip:5:
+  In file included from src/hip/../hip/ck_conv_fwd_impl.hpp:28:
+  In file included from /mnt/data/optimization/composable_kernel/include/ck/tensor_operation/gpu/element/element_wise_operation.hpp:6:
+  In file included from /mnt/data/optimization/composable_kernel/include/ck/utility/data_type.hpp:10:
+  In file included from /mnt/data/optimization/composable_kernel/include/ck/utility/statically_indexed_array.hpp:7:
+  In file included from /mnt/data/optimization/composable_kernel/include/ck/utility/functional2.hpp:8:
+  /mnt/data/optimization/composable_kernel/include/ck/utility/tuple.hpp:15:34: warning: unknown warning group '-Wlifetime-safety-lifetimebound-violation', ignored [-Wunknown-warning-option]
+     15 | #pragma clang diagnostic ignored "-Wlifetime-safety-lifetimebound-violation"
+        |                                  ^
+  In file included from src/hip/ck_conv_fwd_2d_f16.hip:5:
+  In file included from src/hip/../hip/ck_conv_fwd_impl.hpp:28:
+  In file included from /mnt/data/optimization/composable_kernel/include/ck/tensor_operation/gpu/element/element_wise_operation.hpp:7:
+  In file included from /mnt/data/optimization/composable_kernel/include/ck/utility/math_v2.hpp:12:
+  In file included from /mnt/data/optimization/composable_kernel/include/ck/utility/type_convert.hpp:9:
+  In file included from /mnt/data/optimization/composable_kernel/include/ck/utility/mxf4_utils.hpp:9:
+  /mnt/data/optimization/composable_kernel/include/ck/utility/dtype_vector.hpp:11:34: warning: unknown warning group '-Wlifetime-safety-lifetimebound-violation', ignored [-Wunknown-warning-option]
+     11 | #pragma clang diagnostic ignored "-Wlifetime-safety-lifetimebound-violation"
+        |                                  ^
+  2 warnings generated when compiling for host.
+  /opt/rocm/core-7.14/bin/hipcc -I/mnt/data/optimization/composable_kernel/include -I/mnt/data/optimization/composable_kernel/library/include -I/mnt/data/optimization/amd_tools/source/cmp_ext_turing/src -I/mnt/data/optimization/amd_tools/source/cmp_ext_turing/src/cuda -I/mnt/data/miniconda3/envs/py310_amd/lib/python3.10/site-packages/torch/include -I/mnt/data/miniconda3/envs/py310_amd/lib/python3.10/site-packages/torch/include/torch/csrc/api/include -I/mnt/data/miniconda3/envs/py310_amd/lib/python3.10/site-packages/torch/include/THH -I/opt/rocm/core-7.14/include -I/mnt/data/miniconda3/envs/py310/include/python3.10 -c src/hip/ck_conv_fwd_3d_bf16.hip -o /tmp/tmp5vzcaog4.build-temp/src/hip/ck_conv_fwd_3d_bf16.o -D__HIP_PLATFORM_AMD__=1 -DUSE_ROCM=1 -DHIPBLAS_V2 -fPIC -DCUDA_HAS_FP16=1 -D__HIP_NO_HALF_OPERATORS__=1 -D__HIP_NO_HALF_CONVERSIONS__=1 -DHIP_ENABLE_WARP_SYNC_BUILTINS=1 -O3 --offload-arch=gfx1100 -U__HIP_NO_HALF_CONVERSIONS__ -DAMD_TUNED_TORCH_HAS_CK=1 -DCK_ENABLE_FP16=1 -DCK_ENABLE_BF16=1 -DTORCH_API_INCLUDE_EXTENSION_H -DTORCH_EXTENSION_NAME=_native -fno-gpu-rdc -std=c++20
+  In file included from src/hip/ck_conv_fwd_3d_bf16.hip:5:
+  In file included from src/hip/../hip/ck_conv_fwd_impl.hpp:28:
+  In file included from /mnt/data/optimization/composable_kernel/include/ck/tensor_operation/gpu/element/element_wise_operation.hpp:6:
+  In file included from /mnt/data/optimization/composable_kernel/include/ck/utility/data_type.hpp:10:
+  In file included from /mnt/data/optimization/composable_kernel/include/ck/utility/statically_indexed_array.hpp:7:
+  In file included from /mnt/data/optimization/composable_kernel/include/ck/utility/functional2.hpp:8:
+  /mnt/data/optimization/composable_kernel/include/ck/utility/tuple.hpp:15:34: warning: unknown warning group '-Wlifetime-safety-lifetimebound-violation', ignored [-Wunknown-warning-option]
+     15 | #pragma clang diagnostic ignored "-Wlifetime-safety-lifetimebound-violation"
+        |                                  ^
+  In file included from src/hip/ck_conv_fwd_3d_bf16.hip:5:
+  In file included from src/hip/../hip/ck_conv_fwd_impl.hpp:28:
+  In file included from /mnt/data/optimization/composable_kernel/include/ck/tensor_operation/gpu/element/element_wise_operation.hpp:7:
+  In file included from /mnt/data/optimization/composable_kernel/include/ck/utility/math_v2.hpp:12:
+  In file included from /mnt/data/optimization/composable_kernel/include/ck/utility/type_convert.hpp:9:
+  In file included from /mnt/data/optimization/composable_kernel/include/ck/utility/mxf4_utils.hpp:9:
+  /mnt/data/optimization/composable_kernel/include/ck/utility/dtype_vector.hpp:11:34: warning: unknown warning group '-Wlifetime-safety-lifetimebound-violation', ignored [-Wunknown-warning-option]
+     11 | #pragma clang diagnostic ignored "-Wlifetime-safety-lifetimebound-violation"
+        |                                  ^
+  2 warnings generated when compiling for gfx1100.
+  In file included from src/hip/ck_conv_fwd_3d_bf16.hip:5:
+  In file included from src/hip/../hip/ck_conv_fwd_impl.hpp:28:
+  In file included from /mnt/data/optimization/composable_kernel/include/ck/tensor_operation/gpu/element/element_wise_operation.hpp:6:
+  In file included from /mnt/data/optimization/composable_kernel/include/ck/utility/data_type.hpp:10:
+  In file included from /mnt/data/optimization/composable_kernel/include/ck/utility/statically_indexed_array.hpp:7:
+  In file included from /mnt/data/optimization/composable_kernel/include/ck/utility/functional2.hpp:8:
+  /mnt/data/optimization/composable_kernel/include/ck/utility/tuple.hpp:15:34: warning: unknown warning group '-Wlifetime-safety-lifetimebound-violation', ignored [-Wunknown-warning-option]
+     15 | #pragma clang diagnostic ignored "-Wlifetime-safety-lifetimebound-violation"
+        |                                  ^
+  In file included from src/hip/ck_conv_fwd_3d_bf16.hip:5:
+  In file included from src/hip/../hip/ck_conv_fwd_impl.hpp:28:
+  In file included from /mnt/data/optimization/composable_kernel/include/ck/tensor_operation/gpu/element/element_wise_operation.hpp:7:
+  In file included from /mnt/data/optimization/composable_kernel/include/ck/utility/math_v2.hpp:12:
+  In file included from /mnt/data/optimization/composable_kernel/include/ck/utility/type_convert.hpp:9:
+  In file included from /mnt/data/optimization/composable_kernel/include/ck/utility/mxf4_utils.hpp:9:
+  /mnt/data/optimization/composable_kernel/include/ck/utility/dtype_vector.hpp:11:34: warning: unknown warning group '-Wlifetime-safety-lifetimebound-violation', ignored [-Wunknown-warning-option]
+     11 | #pragma clang diagnostic ignored "-Wlifetime-safety-lifetimebound-violation"
+        |                                  ^
+  2 warnings generated when compiling for host.
+  /opt/rocm/core-7.14/bin/hipcc -I/mnt/data/optimization/composable_kernel/include -I/mnt/data/optimization/composable_kernel/library/include -I/mnt/data/optimization/amd_tools/source/cmp_ext_turing/src -I/mnt/data/optimization/amd_tools/source/cmp_ext_turing/src/cuda -I/mnt/data/miniconda3/envs/py310_amd/lib/python3.10/site-packages/torch/include -I/mnt/data/miniconda3/envs/py310_amd/lib/python3.10/site-packages/torch/include/torch/csrc/api/include -I/mnt/data/miniconda3/envs/py310_amd/lib/python3.10/site-packages/torch/include/THH -I/opt/rocm/core-7.14/include -I/mnt/data/miniconda3/envs/py310/include/python3.10 -c src/hip/ck_conv_fwd_3d_f16.hip -o /tmp/tmp5vzcaog4.build-temp/src/hip/ck_conv_fwd_3d_f16.o -D__HIP_PLATFORM_AMD__=1 -DUSE_ROCM=1 -DHIPBLAS_V2 -fPIC -DCUDA_HAS_FP16=1 -D__HIP_NO_HALF_OPERATORS__=1 -D__HIP_NO_HALF_CONVERSIONS__=1 -DHIP_ENABLE_WARP_SYNC_BUILTINS=1 -O3 --offload-arch=gfx1100 -U__HIP_NO_HALF_CONVERSIONS__ -DAMD_TUNED_TORCH_HAS_CK=1 -DCK_ENABLE_FP16=1 -DCK_ENABLE_BF16=1 -DTORCH_API_INCLUDE_EXTENSION_H -DTORCH_EXTENSION_NAME=_native -fno-gpu-rdc -std=c++20
+  In file included from src/hip/ck_conv_fwd_3d_f16.hip:5:
+  In file included from src/hip/../hip/ck_conv_fwd_impl.hpp:28:
+  In file included from /mnt/data/optimization/composable_kernel/include/ck/tensor_operation/gpu/element/element_wise_operation.hpp:6:
+  In file included from /mnt/data/optimization/composable_kernel/include/ck/utility/data_type.hpp:10:
+  In file included from /mnt/data/optimization/composable_kernel/include/ck/utility/statically_indexed_array.hpp:7:
+  In file included from /mnt/data/optimization/composable_kernel/include/ck/utility/functional2.hpp:8:
+  /mnt/data/optimization/composable_kernel/include/ck/utility/tuple.hpp:15:34: warning: unknown warning group '-Wlifetime-safety-lifetimebound-violation', ignored [-Wunknown-warning-option]
+     15 | #pragma clang diagnostic ignored "-Wlifetime-safety-lifetimebound-violation"
+        |                                  ^
+  In file included from src/hip/ck_conv_fwd_3d_f16.hip:5:
+  In file included from src/hip/../hip/ck_conv_fwd_impl.hpp:28:
+  In file included from /mnt/data/optimization/composable_kernel/include/ck/tensor_operation/gpu/element/element_wise_operation.hpp:7:
+  In file included from /mnt/data/optimization/composable_kernel/include/ck/utility/math_v2.hpp:12:
+  In file included from /mnt/data/optimization/composable_kernel/include/ck/utility/type_convert.hpp:9:
+  In file included from /mnt/data/optimization/composable_kernel/include/ck/utility/mxf4_utils.hpp:9:
+  /mnt/data/optimization/composable_kernel/include/ck/utility/dtype_vector.hpp:11:34: warning: unknown warning group '-Wlifetime-safety-lifetimebound-violation', ignored [-Wunknown-warning-option]
+     11 | #pragma clang diagnostic ignored "-Wlifetime-safety-lifetimebound-violation"
+        |                                  ^
+  2 warnings generated when compiling for gfx1100.
+  In file included from src/hip/ck_conv_fwd_3d_f16.hip:5:
+  In file included from src/hip/../hip/ck_conv_fwd_impl.hpp:28:
+  In file included from /mnt/data/optimization/composable_kernel/include/ck/tensor_operation/gpu/element/element_wise_operation.hpp:6:
+  In file included from /mnt/data/optimization/composable_kernel/include/ck/utility/data_type.hpp:10:
+  In file included from /mnt/data/optimization/composable_kernel/include/ck/utility/statically_indexed_array.hpp:7:
+  In file included from /mnt/data/optimization/composable_kernel/include/ck/utility/functional2.hpp:8:
+  /mnt/data/optimization/composable_kernel/include/ck/utility/tuple.hpp:15:34: warning: unknown warning group '-Wlifetime-safety-lifetimebound-violation', ignored [-Wunknown-warning-option]
+     15 | #pragma clang diagnostic ignored "-Wlifetime-safety-lifetimebound-violation"
+        |                                  ^
+  In file included from src/hip/ck_conv_fwd_3d_f16.hip:5:
+  In file included from src/hip/../hip/ck_conv_fwd_impl.hpp:28:
+  In file included from /mnt/data/optimization/composable_kernel/include/ck/tensor_operation/gpu/element/element_wise_operation.hpp:7:
+  In file included from /mnt/data/optimization/composable_kernel/include/ck/utility/math_v2.hpp:12:
+  In file included from /mnt/data/optimization/composable_kernel/include/ck/utility/type_convert.hpp:9:
+  In file included from /mnt/data/optimization/composable_kernel/include/ck/utility/mxf4_utils.hpp:9:
+  /mnt/data/optimization/composable_kernel/include/ck/utility/dtype_vector.hpp:11:34: warning: unknown warning group '-Wlifetime-safety-lifetimebound-violation', ignored [-Wunknown-warning-option]
+     11 | #pragma clang diagnostic ignored "-Wlifetime-safety-lifetimebound-violation"
+        |                                  ^
+  2 warnings generated when compiling for host.
+  /opt/rocm/core-7.14/bin/hipcc -I/mnt/data/optimization/composable_kernel/include -I/mnt/data/optimization/composable_kernel/library/include -I/mnt/data/optimization/amd_tools/source/cmp_ext_turing/src -I/mnt/data/optimization/amd_tools/source/cmp_ext_turing/src/cuda -I/mnt/data/miniconda3/envs/py310_amd/lib/python3.10/site-packages/torch/include -I/mnt/data/miniconda3/envs/py310_amd/lib/python3.10/site-packages/torch/include/torch/csrc/api/include -I/mnt/data/miniconda3/envs/py310_amd/lib/python3.10/site-packages/torch/include/THH -I/opt/rocm/core-7.14/include -I/mnt/data/miniconda3/envs/py310/include/python3.10 -c src/hip/conv2d_fp32.hip -o /tmp/tmp5vzcaog4.build-temp/src/hip/conv2d_fp32.o -D__HIP_PLATFORM_AMD__=1 -DUSE_ROCM=1 -DHIPBLAS_V2 -fPIC -DCUDA_HAS_FP16=1 -D__HIP_NO_HALF_OPERATORS__=1 -D__HIP_NO_HALF_CONVERSIONS__=1 -DHIP_ENABLE_WARP_SYNC_BUILTINS=1 -O3 --offload-arch=gfx1100 -U__HIP_NO_HALF_CONVERSIONS__ -DAMD_TUNED_TORCH_HAS_CK=1 -DCK_ENABLE_FP16=1 -DCK_ENABLE_BF16=1 -DTORCH_API_INCLUDE_EXTENSION_H -DTORCH_EXTENSION_NAME=_native -fno-gpu-rdc -std=c++20
+  /opt/rocm/core-7.14/bin/hipcc -I/mnt/data/optimization/composable_kernel/include -I/mnt/data/optimization/composable_kernel/library/include -I/mnt/data/optimization/amd_tools/source/cmp_ext_turing/src -I/mnt/data/optimization/amd_tools/source/cmp_ext_turing/src/cuda -I/mnt/data/miniconda3/envs/py310_amd/lib/python3.10/site-packages/torch/include -I/mnt/data/miniconda3/envs/py310_amd/lib/python3.10/site-packages/torch/include/torch/csrc/api/include -I/mnt/data/miniconda3/envs/py310_amd/lib/python3.10/site-packages/torch/include/THH -I/opt/rocm/core-7.14/include -I/mnt/data/miniconda3/envs/py310/include/python3.10 -c src/hip/conv3d_fp32.hip -o /tmp/tmp5vzcaog4.build-temp/src/hip/conv3d_fp32.o -D__HIP_PLATFORM_AMD__=1 -DUSE_ROCM=1 -DHIPBLAS_V2 -fPIC -DCUDA_HAS_FP16=1 -D__HIP_NO_HALF_OPERATORS__=1 -D__HIP_NO_HALF_CONVERSIONS__=1 -DHIP_ENABLE_WARP_SYNC_BUILTINS=1 -O3 --offload-arch=gfx1100 -U__HIP_NO_HALF_CONVERSIONS__ -DAMD_TUNED_TORCH_HAS_CK=1 -DCK_ENABLE_FP16=1 -DCK_ENABLE_BF16=1 -DTORCH_API_INCLUDE_EXTENSION_H -DTORCH_EXTENSION_NAME=_native -fno-gpu-rdc -std=c++20
+  /opt/rocm/core-7.14/bin/hipcc -I/mnt/data/optimization/composable_kernel/include -I/mnt/data/optimization/composable_kernel/library/include -I/mnt/data/optimization/amd_tools/source/cmp_ext_turing/src -I/mnt/data/optimization/amd_tools/source/cmp_ext_turing/src/cuda -I/mnt/data/miniconda3/envs/py310_amd/lib/python3.10/site-packages/torch/include -I/mnt/data/miniconda3/envs/py310_amd/lib/python3.10/site-packages/torch/include/torch/csrc/api/include -I/mnt/data/miniconda3/envs/py310_amd/lib/python3.10/site-packages/torch/include/THH -I/opt/rocm/core-7.14/include -I/mnt/data/miniconda3/envs/py310/include/python3.10 -c src/hip/conv3d_fp32_winograd.hip -o /tmp/tmp5vzcaog4.build-temp/src/hip/conv3d_fp32_winograd.o -D__HIP_PLATFORM_AMD__=1 -DUSE_ROCM=1 -DHIPBLAS_V2 -fPIC -DCUDA_HAS_FP16=1 -D__HIP_NO_HALF_OPERATORS__=1 -D__HIP_NO_HALF_CONVERSIONS__=1 -DHIP_ENABLE_WARP_SYNC_BUILTINS=1 -O3 --offload-arch=gfx1100 -U__HIP_NO_HALF_CONVERSIONS__ -DAMD_TUNED_TORCH_HAS_CK=1 -DCK_ENABLE_FP16=1 -DCK_ENABLE_BF16=1 -DTORCH_API_INCLUDE_EXTENSION_H -DTORCH_EXTENSION_NAME=_native -fno-gpu-rdc -std=c++20
+  /opt/rocm/core-7.14/bin/hipcc -I/mnt/data/optimization/composable_kernel/include -I/mnt/data/optimization/composable_kernel/library/include -I/mnt/data/optimization/amd_tools/source/cmp_ext_turing/src -I/mnt/data/optimization/amd_tools/source/cmp_ext_turing/src/cuda -I/mnt/data/miniconda3/envs/py310_amd/lib/python3.10/site-packages/torch/include -I/mnt/data/miniconda3/envs/py310_amd/lib/python3.10/site-packages/torch/include/torch/csrc/api/include -I/mnt/data/miniconda3/envs/py310_amd/lib/python3.10/site-packages/torch/include/THH -I/opt/rocm/core-7.14/include -I/mnt/data/miniconda3/envs/py310/include/python3.10 -c src/hip/generated/conv2d_fp16_bm128_bn128_bk32_s3.hip -o /tmp/tmp5vzcaog4.build-temp/src/hip/generated/conv2d_fp16_bm128_bn128_bk32_s3.o -D__HIP_PLATFORM_AMD__=1 -DUSE_ROCM=1 -DHIPBLAS_V2 -fPIC -DCUDA_HAS_FP16=1 -D__HIP_NO_HALF_OPERATORS__=1 -D__HIP_NO_HALF_CONVERSIONS__=1 -DHIP_ENABLE_WARP_SYNC_BUILTINS=1 -O3 --offload-arch=gfx1100 -U__HIP_NO_HALF_CONVERSIONS__ -DAMD_TUNED_TORCH_HAS_CK=1 -DCK_ENABLE_FP16=1 -DCK_ENABLE_BF16=1 -DTORCH_API_INCLUDE_EXTENSION_H -DTORCH_EXTENSION_NAME=_native -fno-gpu-rdc -std=c++20
+  /opt/rocm/core-7.14/bin/hipcc -I/mnt/data/optimization/composable_kernel/include -I/mnt/data/optimization/composable_kernel/library/include -I/mnt/data/optimization/amd_tools/source/cmp_ext_turing/src -I/mnt/data/optimization/amd_tools/source/cmp_ext_turing/src/cuda -I/mnt/data/miniconda3/envs/py310_amd/lib/python3.10/site-packages/torch/include -I/mnt/data/miniconda3/envs/py310_amd/lib/python3.10/site-packages/torch/include/torch/csrc/api/include -I/mnt/data/miniconda3/envs/py310_amd/lib/python3.10/site-packages/torch/include/THH -I/opt/rocm/core-7.14/include -I/mnt/data/miniconda3/envs/py310/include/python3.10 -c src/hip/generated/conv2d_fp16_bm256_bn128_bk32_s2.hip -o /tmp/tmp5vzcaog4.build-temp/src/hip/generated/conv2d_fp16_bm256_bn128_bk32_s2.o -D__HIP_PLATFORM_AMD__=1 -DUSE_ROCM=1 -DHIPBLAS_V2 -fPIC -DCUDA_HAS_FP16=1 -D__HIP_NO_HALF_OPERATORS__=1 -D__HIP_NO_HALF_CONVERSIONS__=1 -DHIP_ENABLE_WARP_SYNC_BUILTINS=1 -O3 --offload-arch=gfx1100 -U__HIP_NO_HALF_CONVERSIONS__ -DAMD_TUNED_TORCH_HAS_CK=1 -DCK_ENABLE_FP16=1 -DCK_ENABLE_BF16=1 -DTORCH_API_INCLUDE_EXTENSION_H -DTORCH_EXTENSION_NAME=_native -fno-gpu-rdc -std=c++20
+  /opt/rocm/core-7.14/bin/hipcc -I/mnt/data/optimization/composable_kernel/include -I/mnt/data/optimization/composable_kernel/library/include -I/mnt/data/optimization/amd_tools/source/cmp_ext_turing/src -I/mnt/data/optimization/amd_tools/source/cmp_ext_turing/src/cuda -I/mnt/data/miniconda3/envs/py310_amd/lib/python3.10/site-packages/torch/include -I/mnt/data/miniconda3/envs/py310_amd/lib/python3.10/site-packages/torch/include/torch/csrc/api/include -I/mnt/data/miniconda3/envs/py310_amd/lib/python3.10/site-packages/torch/include/THH -I/opt/rocm/core-7.14/include -I/mnt/data/miniconda3/envs/py310/include/python3.10 -c src/hip/generated/conv2d_fp16_bm256_bn64_bk32_s2.hip -o /tmp/tmp5vzcaog4.build-temp/src/hip/generated/conv2d_fp16_bm256_bn64_bk32_s2.o -D__HIP_PLATFORM_AMD__=1 -DUSE_ROCM=1 -DHIPBLAS_V2 -fPIC -DCUDA_HAS_FP16=1 -D__HIP_NO_HALF_OPERATORS__=1 -D__HIP_NO_HALF_CONVERSIONS__=1 -DHIP_ENABLE_WARP_SYNC_BUILTINS=1 -O3 --offload-arch=gfx1100 -U__HIP_NO_HALF_CONVERSIONS__ -DAMD_TUNED_TORCH_HAS_CK=1 -DCK_ENABLE_FP16=1 -DCK_ENABLE_BF16=1 -DTORCH_API_INCLUDE_EXTENSION_H -DTORCH_EXTENSION_NAME=_native -fno-gpu-rdc -std=c++20
+  /opt/rocm/core-7.14/bin/hipcc -I/mnt/data/optimization/composable_kernel/include -I/mnt/data/optimization/composable_kernel/library/include -I/mnt/data/optimization/amd_tools/source/cmp_ext_turing/src -I/mnt/data/optimization/amd_tools/source/cmp_ext_turing/src/cuda -I/mnt/data/miniconda3/envs/py310_amd/lib/python3.10/site-packages/torch/include -I/mnt/data/miniconda3/envs/py310_amd/lib/python3.10/site-packages/torch/include/torch/csrc/api/include -I/mnt/data/miniconda3/envs/py310_amd/lib/python3.10/site-packages/torch/include/THH -I/opt/rocm/core-7.14/include -I/mnt/data/miniconda3/envs/py310/include/python3.10 -c src/hip/generated/conv3d_fp16_bm256_bn128_bk32_s2.hip -o /tmp/tmp5vzcaog4.build-temp/src/hip/generated/conv3d_fp16_bm256_bn128_bk32_s2.o -D__HIP_PLATFORM_AMD__=1 -DUSE_ROCM=1 -DHIPBLAS_V2 -fPIC -DCUDA_HAS_FP16=1 -D__HIP_NO_HALF_OPERATORS__=1 -D__HIP_NO_HALF_CONVERSIONS__=1 -DHIP_ENABLE_WARP_SYNC_BUILTINS=1 -O3 --offload-arch=gfx1100 -U__HIP_NO_HALF_CONVERSIONS__ -DAMD_TUNED_TORCH_HAS_CK=1 -DCK_ENABLE_FP16=1 -DCK_ENABLE_BF16=1 -DTORCH_API_INCLUDE_EXTENSION_H -DTORCH_EXTENSION_NAME=_native -fno-gpu-rdc -std=c++20
+  /opt/rocm/core-7.14/bin/hipcc -I/mnt/data/optimization/composable_kernel/include -I/mnt/data/optimization/composable_kernel/library/include -I/mnt/data/optimization/amd_tools/source/cmp_ext_turing/src -I/mnt/data/optimization/amd_tools/source/cmp_ext_turing/src/cuda -I/mnt/data/miniconda3/envs/py310_amd/lib/python3.10/site-packages/torch/include -I/mnt/data/miniconda3/envs/py310_amd/lib/python3.10/site-packages/torch/include/torch/csrc/api/include -I/mnt/data/miniconda3/envs/py310_amd/lib/python3.10/site-packages/torch/include/THH -I/opt/rocm/core-7.14/include -I/mnt/data/miniconda3/envs/py310/include/python3.10 -c src/hip/generated/conv3d_fp16_winograd_bt8_bc8.hip -o /tmp/tmp5vzcaog4.build-temp/src/hip/generated/conv3d_fp16_winograd_bt8_bc8.o -D__HIP_PLATFORM_AMD__=1 -DUSE_ROCM=1 -DHIPBLAS_V2 -fPIC -DCUDA_HAS_FP16=1 -D__HIP_NO_HALF_OPERATORS__=1 -D__HIP_NO_HALF_CONVERSIONS__=1 -DHIP_ENABLE_WARP_SYNC_BUILTINS=1 -O3 --offload-arch=gfx1100 -U__HIP_NO_HALF_CONVERSIONS__ -DAMD_TUNED_TORCH_HAS_CK=1 -DCK_ENABLE_FP16=1 -DCK_ENABLE_BF16=1 -DTORCH_API_INCLUDE_EXTENSION_H -DTORCH_EXTENSION_NAME=_native -fno-gpu-rdc -std=c++20
+  /opt/rocm/core-7.14/bin/hipcc -I/mnt/data/optimization/composable_kernel/include -I/mnt/data/optimization/composable_kernel/library/include -I/mnt/data/optimization/amd_tools/source/cmp_ext_turing/src -I/mnt/data/optimization/amd_tools/source/cmp_ext_turing/src/cuda -I/mnt/data/miniconda3/envs/py310_amd/lib/python3.10/site-packages/torch/include -I/mnt/data/miniconda3/envs/py310_amd/lib/python3.10/site-packages/torch/include/torch/csrc/api/include -I/mnt/data/miniconda3/envs/py310_amd/lib/python3.10/site-packages/torch/include/THH -I/opt/rocm/core-7.14/include -I/mnt/data/miniconda3/envs/py310/include/python3.10 -c src/hip/group_norm.hip -o /tmp/tmp5vzcaog4.build-temp/src/hip/group_norm.o -D__HIP_PLATFORM_AMD__=1 -DUSE_ROCM=1 -DHIPBLAS_V2 -fPIC -DCUDA_HAS_FP16=1 -D__HIP_NO_HALF_OPERATORS__=1 -D__HIP_NO_HALF_CONVERSIONS__=1 -DHIP_ENABLE_WARP_SYNC_BUILTINS=1 -O3 --offload-arch=gfx1100 -U__HIP_NO_HALF_CONVERSIONS__ -DAMD_TUNED_TORCH_HAS_CK=1 -DCK_ENABLE_FP16=1 -DCK_ENABLE_BF16=1 -DTORCH_API_INCLUDE_EXTENSION_H -DTORCH_EXTENSION_NAME=_native -fno-gpu-rdc -std=c++20
+  /opt/rocm/bin/amdclang++ -O2 -fPIC -fPIC -I/mnt/data/optimization/composable_kernel/include -I/mnt/data/optimization/composable_kernel/library/include -I/mnt/data/optimization/amd_tools/source/cmp_ext_turing/src -I/mnt/data/optimization/amd_tools/source/cmp_ext_turing/src/cuda -I/mnt/data/miniconda3/envs/py310_amd/lib/python3.10/site-packages/torch/include -I/mnt/data/miniconda3/envs/py310_amd/lib/python3.10/site-packages/torch/include/torch/csrc/api/include -I/mnt/data/miniconda3/envs/py310_amd/lib/python3.10/site-packages/torch/include/THH -I/opt/rocm/core-7.14/include -I/mnt/data/miniconda3/envs/py310/include/python3.10 -c src/main_rocm_hip.cpp -o /tmp/tmp5vzcaog4.build-temp/src/main_rocm_hip.o -D__HIP_PLATFORM_AMD__=1 -DUSE_ROCM=1 -DHIPBLAS_V2 -fPIC -O3 -DAMD_TUNED_TORCH_HAS_CK=1 -DCK_ENABLE_FP16=1 -DCK_ENABLE_BF16=1 -DTORCH_API_INCLUDE_EXTENSION_H -DTORCH_EXTENSION_NAME=_native -std=c++20
+  creating /tmp/tmpkd_c6h74.build-lib/amd_tuned_torch
+  /opt/rocm/bin/amdclang++ -O2 -fPIC -pthread -B /mnt/data/miniconda3/envs/py310/compiler_compat -shared -Wl,-rpath,/opt/rocm/lib -Wl,-rpath,/opt/rocm/lib64 -O2 -fPIC /tmp/tmp5vzcaog4.build-temp/src/ck_conv_torch_hip.o /tmp/tmp5vzcaog4.build-temp/src/hip/ck_conv_fwd.o /tmp/tmp5vzcaog4.build-temp/src/hip/ck_conv_fwd_2d_bf16.o /tmp/tmp5vzcaog4.build-temp/src/hip/ck_conv_fwd_2d_f16.o /tmp/tmp5vzcaog4.build-temp/src/hip/ck_conv_fwd_3d_bf16.o /tmp/tmp5vzcaog4.build-temp/src/hip/ck_conv_fwd_3d_f16.o /tmp/tmp5vzcaog4.build-temp/src/hip/conv2d_fp32.o /tmp/tmp5vzcaog4.build-temp/src/hip/conv3d_fp32.o /tmp/tmp5vzcaog4.build-temp/src/hip/conv3d_fp32_winograd.o /tmp/tmp5vzcaog4.build-temp/src/hip/generated/conv2d_fp16_bm128_bn128_bk32_s3.o /tmp/tmp5vzcaog4.build-temp/src/hip/generated/conv2d_fp16_bm256_bn128_bk32_s2.o /tmp/tmp5vzcaog4.build-temp/src/hip/generated/conv2d_fp16_bm256_bn64_bk32_s2.o /tmp/tmp5vzcaog4.build-temp/src/hip/generated/conv3d_fp16_bm256_bn128_bk32_s2.o /tmp/tmp5vzcaog4.build-temp/src/hip/generated/conv3d_fp16_winograd_bt8_bc8.o /tmp/tmp5vzcaog4.build-temp/src/hip/group_norm.o /tmp/tmp5vzcaog4.build-temp/src/main_rocm_hip.o -L/mnt/data/miniconda3/envs/py310_amd/lib/python3.10/site-packages/torch/lib -L/opt/rocm/core-7.14/lib -L/opt/rocm/core-7.14/hip/lib -lc10 -ltorch -ltorch_cpu -ltorch_python -lamdhip64 -lc10_hip -ltorch_hip -o /tmp/tmpkd_c6h74.build-lib/amd_tuned_torch/_native.cpython-310-x86_64-linux-gnu.so
+  copying /tmp/tmpkd_c6h74.build-lib/amd_tuned_torch/_native.cpython-310-x86_64-linux-gnu.so -> amd_tuned_torch
+  Editable install will be performed using a meta path finder.
+
+  Options like `package-data`, `include/exclude-package-data` or
+  `packages.find.exclude/include` may have no effect.
+
+  adding '__editable___amd_tuned_torch_0_2_0_finder.py'
+  adding '__editable__.amd_tuned_torch-0.2.0.pth'
+  creating '/tmp/pip-ephem-wheel-cache-1s8fx8x2/wheels/af/df/7d/c3ecb14c170ae5e10c6d6310d07a0236687fdc0656a3b3a7ea/tmp9asiv2ny/.tmp-abv8vknj/amd_tuned_torch-0.2.0-0.editable-cp310-cp310-linux_x86_64.whl' and adding '/tmp/tmpcvwqegzbamd_tuned_torch-0.2.0-0.editable-cp310-cp310-linux_x86_64.whl' to it
+  adding 'amd_tuned_torch-0.2.0.dist-info/METADATA'
+  adding 'amd_tuned_torch-0.2.0.dist-info/WHEEL'
+  adding 'amd_tuned_torch-0.2.0.dist-info/top_level.txt'
+  adding 'amd_tuned_torch-0.2.0.dist-info/RECORD'
+  /mnt/data/miniconda3/envs/py310_amd/lib/python3.10/site-packages/setuptools/command/editable_wheel.py:352: InformationOnly: Editable installation.
+  !!
+
+          ********************************************************************************
+          Please be careful with folders in your working directory with the same
+          name as your package as they may take precedence during imports.
+          ********************************************************************************
+
+  !!
+    with strategy, WheelFile(wheel_path, "w") as wheel_obj:
+  Building editable for amd_tuned_torch (pyproject.toml): finished with status 'done'
+  Created wheel for amd_tuned_torch: filename=amd_tuned_torch-0.2.0-0.editable-cp310-cp310-linux_x86_64.whl size=2929 sha256=eeb972a3bff2a03e149a3f94d6c0d80f7988f3e49c24429743b0f4156fd865a0
+  Stored in directory: /tmp/pip-ephem-wheel-cache-1s8fx8x2/wheels/af/df/7d/c3ecb14c170ae5e10c6d6310d07a0236687fdc0656a3b3a7ea
+Successfully built amd_tuned_torch
+Installing collected packages: amd_tuned_torch
+  Attempting uninstall: amd_tuned_torch
+    Found existing installation: amd_tuned_torch 0.2.0
+    Uninstalling amd_tuned_torch-0.2.0:
+      Removing file or directory /mnt/data/miniconda3/envs/py310_amd/lib/python3.10/site-packages/__editable__.amd_tuned_torch-0.2.0.pth
+      Removing file or directory /mnt/data/miniconda3/envs/py310_amd/lib/python3.10/site-packages/__editable___amd_tuned_torch_0_2_0_finder.py
+      Removing file or directory /mnt/data/miniconda3/envs/py310_amd/lib/python3.10/site-packages/__pycache__/__editable___amd_tuned_torch_0_2_0_finder.cpython-310.pyc
+      Removing file or directory /mnt/data/miniconda3/envs/py310_amd/lib/python3.10/site-packages/amd_tuned_torch-0.2.0.dist-info/
+      Successfully uninstalled amd_tuned_torch-0.2.0
+Successfully installed amd_tuned_torch-0.2.0

@@ -1,0 +1,351 @@
+Using pip 26.2.1 from /mnt/data/miniconda3/envs/py310_amd/lib/python3.10/site-packages/pip (python 3.10)
+Obtaining file:///mnt/data/optimization/amd_tools/source/cmp_ext_turing
+  Checking if build backend supports build_editable: started
+  Running command Checking if build backend supports build_editable
+  Checking if build backend supports build_editable: finished with status 'done'
+  Preparing editable metadata (pyproject.toml): started
+  Running command Preparing editable metadata (pyproject.toml)
+  OMP: Info #155: KMP_AFFINITY: Initial OS proc set respected: 0-7
+  OMP: Info #216: KMP_AFFINITY: decoding x2APIC ids.
+  OMP: Info #157: KMP_AFFINITY: 8 available OS procs
+  OMP: Info #158: KMP_AFFINITY: Uniform topology
+  OMP: Info #289: KMP_AFFINITY: topology layer "LL cache" is equivalent to "socket".
+  OMP: Info #289: KMP_AFFINITY: topology layer "L3 cache" is equivalent to "socket".
+  OMP: Info #289: KMP_AFFINITY: topology layer "L2 cache" is equivalent to "core".
+  OMP: Info #289: KMP_AFFINITY: topology layer "L1 cache" is equivalent to "core".
+  OMP: Info #191: KMP_AFFINITY: 1 socket x 4 cores/socket x 2 threads/core (4 total cores)
+  OMP: Info #218: KMP_AFFINITY: OS proc to physical thread map:
+  OMP: Info #172: KMP_AFFINITY: OS proc 0 maps to socket 0 core 0 thread 0
+  OMP: Info #172: KMP_AFFINITY: OS proc 4 maps to socket 0 core 0 thread 1
+  OMP: Info #172: KMP_AFFINITY: OS proc 1 maps to socket 0 core 1 thread 2
+  OMP: Info #172: KMP_AFFINITY: OS proc 5 maps to socket 0 core 1 thread 3
+  OMP: Info #172: KMP_AFFINITY: OS proc 2 maps to socket 0 core 2 thread 4
+  OMP: Info #172: KMP_AFFINITY: OS proc 6 maps to socket 0 core 2 thread 5
+  OMP: Info #172: KMP_AFFINITY: OS proc 3 maps to socket 0 core 3 thread 6
+  OMP: Info #172: KMP_AFFINITY: OS proc 7 maps to socket 0 core 3 thread 7
+  OMP: Info #254: KMP_AFFINITY: pid 12444 tid 12444 thread 0 bound to OS proc set 0
+  [aiter] merge tuned file under model_configs/ and configs/ /mnt/data/miniconda3/envs/py310_amd/lib/python3.10/site-packages/aiter/configs/a8w8_bpreshuffle_tuned_gemm.csv:/mnt/data/miniconda3/envs/py310_amd/lib/python3.10/site-packages/aiter/configs/model_configs/a8w8_bpreshuffle_tuned_gemm_dsv3.csv
+  [aiter] merge tuned file under model_configs/ and configs/ /mnt/data/miniconda3/envs/py310_amd/lib/python3.10/site-packages/aiter/configs/a8w8_blockscale_tuned_gemm.csv:/mnt/data/miniconda3/envs/py310_amd/lib/python3.10/site-packages/aiter/configs/model_configs/a8w8_blockscale_tuned_gemm_ds_v3.csv
+  [aiter] merge tuned file under model_configs/ and configs/ /mnt/data/miniconda3/envs/py310_amd/lib/python3.10/site-packages/aiter/configs/a8w8_blockscale_bpreshuffle_tuned_gemm.csv:/mnt/data/miniconda3/envs/py310_amd/lib/python3.10/site-packages/aiter/configs/model_configs/a8w8_blockscale_bpreshuffle_tuned_gemm_dsv3.csv
+  [aiter] import [module_aiter_enum] under /mnt/data/miniconda3/envs/py310_amd/lib/python3.10/site-packages/aiter/jit/module_aiter_enum.so
+  /mnt/data/optimization/amd_tools/source/cmp_ext_turing/src/cuda/group_norm.cu -> /mnt/data/optimization/amd_tools/source/cmp_ext_turing/src/hip/group_norm.hip [skipped, already hipified]
+  /mnt/data/optimization/amd_tools/source/cmp_ext_turing/src/cuda/conv2d_fp32.cu -> /mnt/data/optimization/amd_tools/source/cmp_ext_turing/src/hip/conv2d_fp32.hip [skipped, already hipified]
+  /mnt/data/optimization/amd_tools/source/cmp_ext_turing/src/cuda/conv3d_fp32.cu -> /mnt/data/optimization/amd_tools/source/cmp_ext_turing/src/hip/conv3d_fp32.hip [skipped, already hipified]
+  /mnt/data/optimization/amd_tools/source/cmp_ext_turing/src/cuda/conv3d_fp32_winograd.cu -> /mnt/data/optimization/amd_tools/source/cmp_ext_turing/src/hip/conv3d_fp32_winograd.hip [skipped, already hipified]
+  /mnt/data/optimization/amd_tools/source/cmp_ext_turing/src/dispatch_common.h -> /mnt/data/optimization/amd_tools/source/cmp_ext_turing/src/dispatch_common.h [skipped, no changes]
+  /mnt/data/optimization/amd_tools/source/cmp_ext_turing/src/main_rocm.cpp -> /mnt/data/optimization/amd_tools/source/cmp_ext_turing/src/main_rocm_hip.cpp [skipped, already hipified]
+  /mnt/data/optimization/amd_tools/source/cmp_ext_turing/src/cuda/generated/conv2d_fp16_bm128_bn128_bk32_s3.cu -> /mnt/data/optimization/amd_tools/source/cmp_ext_turing/src/hip/generated/conv2d_fp16_bm128_bn128_bk32_s3.hip [skipped, already hipified]
+  /mnt/data/optimization/amd_tools/source/cmp_ext_turing/src/cuda/generated/conv2d_fp16_bm256_bn128_bk32_s2.cu -> /mnt/data/optimization/amd_tools/source/cmp_ext_turing/src/hip/generated/conv2d_fp16_bm256_bn128_bk32_s2.hip [skipped, already hipified]
+  /mnt/data/optimization/amd_tools/source/cmp_ext_turing/src/cuda/generated/conv2d_fp16_bm256_bn64_bk32_s2.cu -> /mnt/data/optimization/amd_tools/source/cmp_ext_turing/src/hip/generated/conv2d_fp16_bm256_bn64_bk32_s2.hip [skipped, already hipified]
+  /mnt/data/optimization/amd_tools/source/cmp_ext_turing/src/cuda/generated/conv3d_fp16_bm256_bn128_bk32_s2.cu -> /mnt/data/optimization/amd_tools/source/cmp_ext_turing/src/hip/generated/conv3d_fp16_bm256_bn128_bk32_s2.hip [skipped, already hipified]
+  /mnt/data/optimization/amd_tools/source/cmp_ext_turing/src/cuda/generated/conv3d_fp16_winograd_bt8_bc8.cu -> /mnt/data/optimization/amd_tools/source/cmp_ext_turing/src/hip/generated/conv3d_fp16_winograd_bt8_bc8.hip [skipped, already hipified]
+  [92mSuccessfully preprocessed all matching files.[0m
+  Total number of unsupported CUDA function calls: 0
+
+
+  Total number of replaced kernel launches: 0
+  running dist_info
+  creating /tmp/pip-modern-metadata-m03yvp1j/amd_tuned_torch.egg-info
+  writing /tmp/pip-modern-metadata-m03yvp1j/amd_tuned_torch.egg-info/PKG-INFO
+  writing dependency_links to /tmp/pip-modern-metadata-m03yvp1j/amd_tuned_torch.egg-info/dependency_links.txt
+  writing top-level names to /tmp/pip-modern-metadata-m03yvp1j/amd_tuned_torch.egg-info/top_level.txt
+  writing manifest file '/tmp/pip-modern-metadata-m03yvp1j/amd_tuned_torch.egg-info/SOURCES.txt'
+  reading manifest file '/tmp/pip-modern-metadata-m03yvp1j/amd_tuned_torch.egg-info/SOURCES.txt'
+  writing manifest file '/tmp/pip-modern-metadata-m03yvp1j/amd_tuned_torch.egg-info/SOURCES.txt'
+  creating '/tmp/pip-modern-metadata-m03yvp1j/amd_tuned_torch-0.2.0.dist-info'
+  Preparing editable metadata (pyproject.toml): finished with status 'done'
+Building wheels for collected packages: amd_tuned_torch
+  Building editable for amd_tuned_torch (pyproject.toml): started
+  Running command Building editable for amd_tuned_torch (pyproject.toml)
+  OMP: Info #155: KMP_AFFINITY: Initial OS proc set respected: 0-7
+  OMP: Info #216: KMP_AFFINITY: decoding x2APIC ids.
+  OMP: Info #157: KMP_AFFINITY: 8 available OS procs
+  OMP: Info #158: KMP_AFFINITY: Uniform topology
+  OMP: Info #289: KMP_AFFINITY: topology layer "LL cache" is equivalent to "socket".
+  OMP: Info #289: KMP_AFFINITY: topology layer "L3 cache" is equivalent to "socket".
+  OMP: Info #289: KMP_AFFINITY: topology layer "L2 cache" is equivalent to "core".
+  OMP: Info #289: KMP_AFFINITY: topology layer "L1 cache" is equivalent to "core".
+  OMP: Info #191: KMP_AFFINITY: 1 socket x 4 cores/socket x 2 threads/core (4 total cores)
+  OMP: Info #218: KMP_AFFINITY: OS proc to physical thread map:
+  OMP: Info #172: KMP_AFFINITY: OS proc 0 maps to socket 0 core 0 thread 0
+  OMP: Info #172: KMP_AFFINITY: OS proc 4 maps to socket 0 core 0 thread 1
+  OMP: Info #172: KMP_AFFINITY: OS proc 1 maps to socket 0 core 1 thread 2
+  OMP: Info #172: KMP_AFFINITY: OS proc 5 maps to socket 0 core 1 thread 3
+  OMP: Info #172: KMP_AFFINITY: OS proc 2 maps to socket 0 core 2 thread 4
+  OMP: Info #172: KMP_AFFINITY: OS proc 6 maps to socket 0 core 2 thread 5
+  OMP: Info #172: KMP_AFFINITY: OS proc 3 maps to socket 0 core 3 thread 6
+  OMP: Info #172: KMP_AFFINITY: OS proc 7 maps to socket 0 core 3 thread 7
+  OMP: Info #254: KMP_AFFINITY: pid 12480 tid 12480 thread 0 bound to OS proc set 0
+  [aiter] merge tuned file under model_configs/ and configs/ /mnt/data/miniconda3/envs/py310_amd/lib/python3.10/site-packages/aiter/configs/a8w8_bpreshuffle_tuned_gemm.csv:/mnt/data/miniconda3/envs/py310_amd/lib/python3.10/site-packages/aiter/configs/model_configs/a8w8_bpreshuffle_tuned_gemm_dsv3.csv
+  [aiter] merge tuned file under model_configs/ and configs/ /mnt/data/miniconda3/envs/py310_amd/lib/python3.10/site-packages/aiter/configs/a8w8_blockscale_tuned_gemm.csv:/mnt/data/miniconda3/envs/py310_amd/lib/python3.10/site-packages/aiter/configs/model_configs/a8w8_blockscale_tuned_gemm_ds_v3.csv
+  [aiter] merge tuned file under model_configs/ and configs/ /mnt/data/miniconda3/envs/py310_amd/lib/python3.10/site-packages/aiter/configs/a8w8_blockscale_bpreshuffle_tuned_gemm.csv:/mnt/data/miniconda3/envs/py310_amd/lib/python3.10/site-packages/aiter/configs/model_configs/a8w8_blockscale_bpreshuffle_tuned_gemm_dsv3.csv
+  [aiter] import [module_aiter_enum] under /mnt/data/miniconda3/envs/py310_amd/lib/python3.10/site-packages/aiter/jit/module_aiter_enum.so
+  /mnt/data/optimization/amd_tools/source/cmp_ext_turing/src/cuda/group_norm.cu -> /mnt/data/optimization/amd_tools/source/cmp_ext_turing/src/hip/group_norm.hip [skipped, already hipified]
+  /mnt/data/optimization/amd_tools/source/cmp_ext_turing/src/cuda/conv2d_fp32.cu -> /mnt/data/optimization/amd_tools/source/cmp_ext_turing/src/hip/conv2d_fp32.hip [skipped, already hipified]
+  /mnt/data/optimization/amd_tools/source/cmp_ext_turing/src/cuda/conv3d_fp32.cu -> /mnt/data/optimization/amd_tools/source/cmp_ext_turing/src/hip/conv3d_fp32.hip [skipped, already hipified]
+  /mnt/data/optimization/amd_tools/source/cmp_ext_turing/src/cuda/conv3d_fp32_winograd.cu -> /mnt/data/optimization/amd_tools/source/cmp_ext_turing/src/hip/conv3d_fp32_winograd.hip [skipped, already hipified]
+  /mnt/data/optimization/amd_tools/source/cmp_ext_turing/src/dispatch_common.h -> /mnt/data/optimization/amd_tools/source/cmp_ext_turing/src/dispatch_common.h [skipped, no changes]
+  /mnt/data/optimization/amd_tools/source/cmp_ext_turing/src/main_rocm.cpp -> /mnt/data/optimization/amd_tools/source/cmp_ext_turing/src/main_rocm_hip.cpp [skipped, already hipified]
+  /mnt/data/optimization/amd_tools/source/cmp_ext_turing/src/cuda/generated/conv2d_fp16_bm128_bn128_bk32_s3.cu -> /mnt/data/optimization/amd_tools/source/cmp_ext_turing/src/hip/generated/conv2d_fp16_bm128_bn128_bk32_s3.hip [skipped, already hipified]
+  /mnt/data/optimization/amd_tools/source/cmp_ext_turing/src/cuda/generated/conv2d_fp16_bm256_bn128_bk32_s2.cu -> /mnt/data/optimization/amd_tools/source/cmp_ext_turing/src/hip/generated/conv2d_fp16_bm256_bn128_bk32_s2.hip [skipped, already hipified]
+  /mnt/data/optimization/amd_tools/source/cmp_ext_turing/src/cuda/generated/conv2d_fp16_bm256_bn64_bk32_s2.cu -> /mnt/data/optimization/amd_tools/source/cmp_ext_turing/src/hip/generated/conv2d_fp16_bm256_bn64_bk32_s2.hip [skipped, already hipified]
+  /mnt/data/optimization/amd_tools/source/cmp_ext_turing/src/cuda/generated/conv3d_fp16_bm256_bn128_bk32_s2.cu -> /mnt/data/optimization/amd_tools/source/cmp_ext_turing/src/hip/generated/conv3d_fp16_bm256_bn128_bk32_s2.hip [skipped, already hipified]
+  /mnt/data/optimization/amd_tools/source/cmp_ext_turing/src/cuda/generated/conv3d_fp16_winograd_bt8_bc8.cu -> /mnt/data/optimization/amd_tools/source/cmp_ext_turing/src/hip/generated/conv3d_fp16_winograd_bt8_bc8.hip [skipped, already hipified]
+  [92mSuccessfully preprocessed all matching files.[0m
+  Total number of unsupported CUDA function calls: 0
+
+
+  Total number of replaced kernel launches: 0
+  running editable_wheel
+  creating /tmp/pip-ephem-wheel-cache-eh25u42g/wheels/af/df/7d/c3ecb14c170ae5e10c6d6310d07a0236687fdc0656a3b3a7ea/tmpn2vjgmtj/.tmp-6ur9u4sv/amd_tuned_torch.egg-info
+  writing /tmp/pip-ephem-wheel-cache-eh25u42g/wheels/af/df/7d/c3ecb14c170ae5e10c6d6310d07a0236687fdc0656a3b3a7ea/tmpn2vjgmtj/.tmp-6ur9u4sv/amd_tuned_torch.egg-info/PKG-INFO
+  writing dependency_links to /tmp/pip-ephem-wheel-cache-eh25u42g/wheels/af/df/7d/c3ecb14c170ae5e10c6d6310d07a0236687fdc0656a3b3a7ea/tmpn2vjgmtj/.tmp-6ur9u4sv/amd_tuned_torch.egg-info/dependency_links.txt
+  writing top-level names to /tmp/pip-ephem-wheel-cache-eh25u42g/wheels/af/df/7d/c3ecb14c170ae5e10c6d6310d07a0236687fdc0656a3b3a7ea/tmpn2vjgmtj/.tmp-6ur9u4sv/amd_tuned_torch.egg-info/top_level.txt
+  writing manifest file '/tmp/pip-ephem-wheel-cache-eh25u42g/wheels/af/df/7d/c3ecb14c170ae5e10c6d6310d07a0236687fdc0656a3b3a7ea/tmpn2vjgmtj/.tmp-6ur9u4sv/amd_tuned_torch.egg-info/SOURCES.txt'
+  reading manifest file '/tmp/pip-ephem-wheel-cache-eh25u42g/wheels/af/df/7d/c3ecb14c170ae5e10c6d6310d07a0236687fdc0656a3b3a7ea/tmpn2vjgmtj/.tmp-6ur9u4sv/amd_tuned_torch.egg-info/SOURCES.txt'
+  writing manifest file '/tmp/pip-ephem-wheel-cache-eh25u42g/wheels/af/df/7d/c3ecb14c170ae5e10c6d6310d07a0236687fdc0656a3b3a7ea/tmpn2vjgmtj/.tmp-6ur9u4sv/amd_tuned_torch.egg-info/SOURCES.txt'
+  creating '/tmp/pip-ephem-wheel-cache-eh25u42g/wheels/af/df/7d/c3ecb14c170ae5e10c6d6310d07a0236687fdc0656a3b3a7ea/tmpn2vjgmtj/.tmp-6ur9u4sv/amd_tuned_torch-0.2.0.dist-info'
+  creating /tmp/pip-ephem-wheel-cache-eh25u42g/wheels/af/df/7d/c3ecb14c170ae5e10c6d6310d07a0236687fdc0656a3b3a7ea/tmpn2vjgmtj/.tmp-6ur9u4sv/amd_tuned_torch-0.2.0.dist-info/WHEEL
+  running build_ext
+  building 'amd_tuned_torch._native' extension
+  creating /tmp/tmpltpg2o2k.build-temp/src/hip
+  creating /tmp/tmpltpg2o2k.build-temp/src/hip/generated
+  /opt/rocm/core-7.14/bin/hipcc -I/mnt/data/miniconda3/envs/py310_amd/lib/python3.10/site-packages/torch/include -I/mnt/data/miniconda3/envs/py310_amd/lib/python3.10/site-packages/torch/include/torch/csrc/api/include -I/mnt/data/miniconda3/envs/py310_amd/lib/python3.10/site-packages/torch/include/THH -I/opt/rocm/core-7.14/include -I/mnt/data/miniconda3/envs/py310/include/python3.10 -c src/hip/conv2d_fp32.hip -o /tmp/tmpltpg2o2k.build-temp/src/hip/conv2d_fp32.o -D__HIP_PLATFORM_AMD__=1 -DUSE_ROCM=1 -DHIPBLAS_V2 -fPIC -DCUDA_HAS_FP16=1 -D__HIP_NO_HALF_OPERATORS__=1 -D__HIP_NO_HALF_CONVERSIONS__=1 -DHIP_ENABLE_WARP_SYNC_BUILTINS=1 -O3 --offload-arch=gfx1100 -U__HIP_NO_HALF_CONVERSIONS__ -DTORCH_API_INCLUDE_EXTENSION_H -DTORCH_EXTENSION_NAME=_native -fno-gpu-rdc -std=c++20
+  /opt/rocm/core-7.14/bin/hipcc -I/mnt/data/miniconda3/envs/py310_amd/lib/python3.10/site-packages/torch/include -I/mnt/data/miniconda3/envs/py310_amd/lib/python3.10/site-packages/torch/include/torch/csrc/api/include -I/mnt/data/miniconda3/envs/py310_amd/lib/python3.10/site-packages/torch/include/THH -I/opt/rocm/core-7.14/include -I/mnt/data/miniconda3/envs/py310/include/python3.10 -c src/hip/conv3d_fp32.hip -o /tmp/tmpltpg2o2k.build-temp/src/hip/conv3d_fp32.o -D__HIP_PLATFORM_AMD__=1 -DUSE_ROCM=1 -DHIPBLAS_V2 -fPIC -DCUDA_HAS_FP16=1 -D__HIP_NO_HALF_OPERATORS__=1 -D__HIP_NO_HALF_CONVERSIONS__=1 -DHIP_ENABLE_WARP_SYNC_BUILTINS=1 -O3 --offload-arch=gfx1100 -U__HIP_NO_HALF_CONVERSIONS__ -DTORCH_API_INCLUDE_EXTENSION_H -DTORCH_EXTENSION_NAME=_native -fno-gpu-rdc -std=c++20
+  /opt/rocm/core-7.14/bin/hipcc -I/mnt/data/miniconda3/envs/py310_amd/lib/python3.10/site-packages/torch/include -I/mnt/data/miniconda3/envs/py310_amd/lib/python3.10/site-packages/torch/include/torch/csrc/api/include -I/mnt/data/miniconda3/envs/py310_amd/lib/python3.10/site-packages/torch/include/THH -I/opt/rocm/core-7.14/include -I/mnt/data/miniconda3/envs/py310/include/python3.10 -c src/hip/conv3d_fp32_winograd.hip -o /tmp/tmpltpg2o2k.build-temp/src/hip/conv3d_fp32_winograd.o -D__HIP_PLATFORM_AMD__=1 -DUSE_ROCM=1 -DHIPBLAS_V2 -fPIC -DCUDA_HAS_FP16=1 -D__HIP_NO_HALF_OPERATORS__=1 -D__HIP_NO_HALF_CONVERSIONS__=1 -DHIP_ENABLE_WARP_SYNC_BUILTINS=1 -O3 --offload-arch=gfx1100 -U__HIP_NO_HALF_CONVERSIONS__ -DTORCH_API_INCLUDE_EXTENSION_H -DTORCH_EXTENSION_NAME=_native -fno-gpu-rdc -std=c++20
+  /opt/rocm/core-7.14/bin/hipcc -I/mnt/data/miniconda3/envs/py310_amd/lib/python3.10/site-packages/torch/include -I/mnt/data/miniconda3/envs/py310_amd/lib/python3.10/site-packages/torch/include/torch/csrc/api/include -I/mnt/data/miniconda3/envs/py310_amd/lib/python3.10/site-packages/torch/include/THH -I/opt/rocm/core-7.14/include -I/mnt/data/miniconda3/envs/py310/include/python3.10 -c src/hip/generated/conv2d_fp16_bm128_bn128_bk32_s3.hip -o /tmp/tmpltpg2o2k.build-temp/src/hip/generated/conv2d_fp16_bm128_bn128_bk32_s3.o -D__HIP_PLATFORM_AMD__=1 -DUSE_ROCM=1 -DHIPBLAS_V2 -fPIC -DCUDA_HAS_FP16=1 -D__HIP_NO_HALF_OPERATORS__=1 -D__HIP_NO_HALF_CONVERSIONS__=1 -DHIP_ENABLE_WARP_SYNC_BUILTINS=1 -O3 --offload-arch=gfx1100 -U__HIP_NO_HALF_CONVERSIONS__ -DTORCH_API_INCLUDE_EXTENSION_H -DTORCH_EXTENSION_NAME=_native -fno-gpu-rdc -std=c++20
+  src/hip/generated/conv2d_fp16_bm128_bn128_bk32_s3.hip:362:9: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+    362 |         hipFuncSetAttribute(reinterpret_cast<const void*>(conv2d_fp16_kernel_bm128_bn128_bk32_s3),
+        |         ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    363 |                              hipFuncAttributeMaxDynamicSharedMemorySize, total_smem);
+        |                              ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  src/hip/generated/conv2d_fp16_bm128_bn128_bk32_s3.hip:394:5: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+    394 |     hipFuncGetAttributes(&attr, reinterpret_cast<const void*>(conv2d_fp16_kernel_bm128_bn128_bk32_s3));
+        |     ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  src/hip/generated/conv2d_fp16_bm128_bn128_bk32_s3.hip:402:5: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+    402 |     hipOccupancyMaxActiveBlocksPerMultiprocessor(
+        |     ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    403 |         max_active_blocks_per_cu,
+        |         ~~~~~~~~~~~~~~~~~~~~~~~~~
+    404 |         reinterpret_cast<const void*>(conv2d_fp16_kernel_bm128_bn128_bk32_s3),
+        |         ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    405 |         BLOCK_SIZE, dynamic_smem);
+        |         ~~~~~~~~~~~~~~~~~~~~~~~~~
+  3 warnings generated when compiling for gfx1100.
+  src/hip/generated/conv2d_fp16_bm128_bn128_bk32_s3.hip:362:9: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+    362 |         hipFuncSetAttribute(reinterpret_cast<const void*>(conv2d_fp16_kernel_bm128_bn128_bk32_s3),
+        |         ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    363 |                              hipFuncAttributeMaxDynamicSharedMemorySize, total_smem);
+        |                              ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  src/hip/generated/conv2d_fp16_bm128_bn128_bk32_s3.hip:394:5: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+    394 |     hipFuncGetAttributes(&attr, reinterpret_cast<const void*>(conv2d_fp16_kernel_bm128_bn128_bk32_s3));
+        |     ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  src/hip/generated/conv2d_fp16_bm128_bn128_bk32_s3.hip:402:5: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+    402 |     hipOccupancyMaxActiveBlocksPerMultiprocessor(
+        |     ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    403 |         max_active_blocks_per_cu,
+        |         ~~~~~~~~~~~~~~~~~~~~~~~~~
+    404 |         reinterpret_cast<const void*>(conv2d_fp16_kernel_bm128_bn128_bk32_s3),
+        |         ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    405 |         BLOCK_SIZE, dynamic_smem);
+        |         ~~~~~~~~~~~~~~~~~~~~~~~~~
+  3 warnings generated when compiling for host.
+  /opt/rocm/core-7.14/bin/hipcc -I/mnt/data/miniconda3/envs/py310_amd/lib/python3.10/site-packages/torch/include -I/mnt/data/miniconda3/envs/py310_amd/lib/python3.10/site-packages/torch/include/torch/csrc/api/include -I/mnt/data/miniconda3/envs/py310_amd/lib/python3.10/site-packages/torch/include/THH -I/opt/rocm/core-7.14/include -I/mnt/data/miniconda3/envs/py310/include/python3.10 -c src/hip/generated/conv2d_fp16_bm256_bn128_bk32_s2.hip -o /tmp/tmpltpg2o2k.build-temp/src/hip/generated/conv2d_fp16_bm256_bn128_bk32_s2.o -D__HIP_PLATFORM_AMD__=1 -DUSE_ROCM=1 -DHIPBLAS_V2 -fPIC -DCUDA_HAS_FP16=1 -D__HIP_NO_HALF_OPERATORS__=1 -D__HIP_NO_HALF_CONVERSIONS__=1 -DHIP_ENABLE_WARP_SYNC_BUILTINS=1 -O3 --offload-arch=gfx1100 -U__HIP_NO_HALF_CONVERSIONS__ -DTORCH_API_INCLUDE_EXTENSION_H -DTORCH_EXTENSION_NAME=_native -fno-gpu-rdc -std=c++20
+  src/hip/generated/conv2d_fp16_bm256_bn128_bk32_s2.hip:362:9: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+    362 |         hipFuncSetAttribute(reinterpret_cast<const void*>(conv2d_fp16_kernel_bm256_bn128_bk32_s2),
+        |         ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    363 |                              hipFuncAttributeMaxDynamicSharedMemorySize, total_smem);
+        |                              ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  src/hip/generated/conv2d_fp16_bm256_bn128_bk32_s2.hip:394:5: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+    394 |     hipFuncGetAttributes(&attr, reinterpret_cast<const void*>(conv2d_fp16_kernel_bm256_bn128_bk32_s2));
+        |     ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  src/hip/generated/conv2d_fp16_bm256_bn128_bk32_s2.hip:402:5: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+    402 |     hipOccupancyMaxActiveBlocksPerMultiprocessor(
+        |     ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    403 |         max_active_blocks_per_cu,
+        |         ~~~~~~~~~~~~~~~~~~~~~~~~~
+    404 |         reinterpret_cast<const void*>(conv2d_fp16_kernel_bm256_bn128_bk32_s2),
+        |         ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    405 |         BLOCK_SIZE, dynamic_smem);
+        |         ~~~~~~~~~~~~~~~~~~~~~~~~~
+  3 warnings generated when compiling for gfx1100.
+  src/hip/generated/conv2d_fp16_bm256_bn128_bk32_s2.hip:362:9: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+    362 |         hipFuncSetAttribute(reinterpret_cast<const void*>(conv2d_fp16_kernel_bm256_bn128_bk32_s2),
+        |         ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    363 |                              hipFuncAttributeMaxDynamicSharedMemorySize, total_smem);
+        |                              ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  src/hip/generated/conv2d_fp16_bm256_bn128_bk32_s2.hip:394:5: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+    394 |     hipFuncGetAttributes(&attr, reinterpret_cast<const void*>(conv2d_fp16_kernel_bm256_bn128_bk32_s2));
+        |     ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  src/hip/generated/conv2d_fp16_bm256_bn128_bk32_s2.hip:402:5: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+    402 |     hipOccupancyMaxActiveBlocksPerMultiprocessor(
+        |     ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    403 |         max_active_blocks_per_cu,
+        |         ~~~~~~~~~~~~~~~~~~~~~~~~~
+    404 |         reinterpret_cast<const void*>(conv2d_fp16_kernel_bm256_bn128_bk32_s2),
+        |         ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    405 |         BLOCK_SIZE, dynamic_smem);
+        |         ~~~~~~~~~~~~~~~~~~~~~~~~~
+  3 warnings generated when compiling for host.
+  /opt/rocm/core-7.14/bin/hipcc -I/mnt/data/miniconda3/envs/py310_amd/lib/python3.10/site-packages/torch/include -I/mnt/data/miniconda3/envs/py310_amd/lib/python3.10/site-packages/torch/include/torch/csrc/api/include -I/mnt/data/miniconda3/envs/py310_amd/lib/python3.10/site-packages/torch/include/THH -I/opt/rocm/core-7.14/include -I/mnt/data/miniconda3/envs/py310/include/python3.10 -c src/hip/generated/conv2d_fp16_bm256_bn64_bk32_s2.hip -o /tmp/tmpltpg2o2k.build-temp/src/hip/generated/conv2d_fp16_bm256_bn64_bk32_s2.o -D__HIP_PLATFORM_AMD__=1 -DUSE_ROCM=1 -DHIPBLAS_V2 -fPIC -DCUDA_HAS_FP16=1 -D__HIP_NO_HALF_OPERATORS__=1 -D__HIP_NO_HALF_CONVERSIONS__=1 -DHIP_ENABLE_WARP_SYNC_BUILTINS=1 -O3 --offload-arch=gfx1100 -U__HIP_NO_HALF_CONVERSIONS__ -DTORCH_API_INCLUDE_EXTENSION_H -DTORCH_EXTENSION_NAME=_native -fno-gpu-rdc -std=c++20
+  src/hip/generated/conv2d_fp16_bm256_bn64_bk32_s2.hip:362:9: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+    362 |         hipFuncSetAttribute(reinterpret_cast<const void*>(conv2d_fp16_kernel_bm256_bn64_bk32_s2),
+        |         ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    363 |                              hipFuncAttributeMaxDynamicSharedMemorySize, total_smem);
+        |                              ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  src/hip/generated/conv2d_fp16_bm256_bn64_bk32_s2.hip:394:5: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+    394 |     hipFuncGetAttributes(&attr, reinterpret_cast<const void*>(conv2d_fp16_kernel_bm256_bn64_bk32_s2));
+        |     ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  src/hip/generated/conv2d_fp16_bm256_bn64_bk32_s2.hip:402:5: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+    402 |     hipOccupancyMaxActiveBlocksPerMultiprocessor(
+        |     ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    403 |         max_active_blocks_per_cu,
+        |         ~~~~~~~~~~~~~~~~~~~~~~~~~
+    404 |         reinterpret_cast<const void*>(conv2d_fp16_kernel_bm256_bn64_bk32_s2),
+        |         ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    405 |         BLOCK_SIZE, dynamic_smem);
+        |         ~~~~~~~~~~~~~~~~~~~~~~~~~
+  3 warnings generated when compiling for gfx1100.
+  src/hip/generated/conv2d_fp16_bm256_bn64_bk32_s2.hip:362:9: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+    362 |         hipFuncSetAttribute(reinterpret_cast<const void*>(conv2d_fp16_kernel_bm256_bn64_bk32_s2),
+        |         ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    363 |                              hipFuncAttributeMaxDynamicSharedMemorySize, total_smem);
+        |                              ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  src/hip/generated/conv2d_fp16_bm256_bn64_bk32_s2.hip:394:5: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+    394 |     hipFuncGetAttributes(&attr, reinterpret_cast<const void*>(conv2d_fp16_kernel_bm256_bn64_bk32_s2));
+        |     ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  src/hip/generated/conv2d_fp16_bm256_bn64_bk32_s2.hip:402:5: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+    402 |     hipOccupancyMaxActiveBlocksPerMultiprocessor(
+        |     ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    403 |         max_active_blocks_per_cu,
+        |         ~~~~~~~~~~~~~~~~~~~~~~~~~
+    404 |         reinterpret_cast<const void*>(conv2d_fp16_kernel_bm256_bn64_bk32_s2),
+        |         ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    405 |         BLOCK_SIZE, dynamic_smem);
+        |         ~~~~~~~~~~~~~~~~~~~~~~~~~
+  3 warnings generated when compiling for host.
+  /opt/rocm/core-7.14/bin/hipcc -I/mnt/data/miniconda3/envs/py310_amd/lib/python3.10/site-packages/torch/include -I/mnt/data/miniconda3/envs/py310_amd/lib/python3.10/site-packages/torch/include/torch/csrc/api/include -I/mnt/data/miniconda3/envs/py310_amd/lib/python3.10/site-packages/torch/include/THH -I/opt/rocm/core-7.14/include -I/mnt/data/miniconda3/envs/py310/include/python3.10 -c src/hip/generated/conv3d_fp16_bm256_bn128_bk32_s2.hip -o /tmp/tmpltpg2o2k.build-temp/src/hip/generated/conv3d_fp16_bm256_bn128_bk32_s2.o -D__HIP_PLATFORM_AMD__=1 -DUSE_ROCM=1 -DHIPBLAS_V2 -fPIC -DCUDA_HAS_FP16=1 -D__HIP_NO_HALF_OPERATORS__=1 -D__HIP_NO_HALF_CONVERSIONS__=1 -DHIP_ENABLE_WARP_SYNC_BUILTINS=1 -O3 --offload-arch=gfx1100 -U__HIP_NO_HALF_CONVERSIONS__ -DTORCH_API_INCLUDE_EXTENSION_H -DTORCH_EXTENSION_NAME=_native -fno-gpu-rdc -std=c++20
+  src/hip/generated/conv3d_fp16_bm256_bn128_bk32_s2.hip:314:9: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+    314 |         hipFuncSetAttribute(reinterpret_cast<const void*>(conv3d_fp16_kernel_bm256_bn128_bk32_s2),
+        |         ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    315 |                              hipFuncAttributeMaxDynamicSharedMemorySize, total_smem);
+        |                              ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  1 warning generated when compiling for gfx1100.
+  src/hip/generated/conv3d_fp16_bm256_bn128_bk32_s2.hip:314:9: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+    314 |         hipFuncSetAttribute(reinterpret_cast<const void*>(conv3d_fp16_kernel_bm256_bn128_bk32_s2),
+        |         ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    315 |                              hipFuncAttributeMaxDynamicSharedMemorySize, total_smem);
+        |                              ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  1 warning generated when compiling for host.
+  /opt/rocm/core-7.14/bin/hipcc -I/mnt/data/miniconda3/envs/py310_amd/lib/python3.10/site-packages/torch/include -I/mnt/data/miniconda3/envs/py310_amd/lib/python3.10/site-packages/torch/include/torch/csrc/api/include -I/mnt/data/miniconda3/envs/py310_amd/lib/python3.10/site-packages/torch/include/THH -I/opt/rocm/core-7.14/include -I/mnt/data/miniconda3/envs/py310/include/python3.10 -c src/hip/generated/conv3d_fp16_winograd_bt8_bc8.hip -o /tmp/tmpltpg2o2k.build-temp/src/hip/generated/conv3d_fp16_winograd_bt8_bc8.o -D__HIP_PLATFORM_AMD__=1 -DUSE_ROCM=1 -DHIPBLAS_V2 -fPIC -DCUDA_HAS_FP16=1 -D__HIP_NO_HALF_OPERATORS__=1 -D__HIP_NO_HALF_CONVERSIONS__=1 -DHIP_ENABLE_WARP_SYNC_BUILTINS=1 -O3 --offload-arch=gfx1100 -U__HIP_NO_HALF_CONVERSIONS__ -DTORCH_API_INCLUDE_EXTENSION_H -DTORCH_EXTENSION_NAME=_native -fno-gpu-rdc -std=c++20
+  /opt/rocm/core-7.14/bin/hipcc -I/mnt/data/miniconda3/envs/py310_amd/lib/python3.10/site-packages/torch/include -I/mnt/data/miniconda3/envs/py310_amd/lib/python3.10/site-packages/torch/include/torch/csrc/api/include -I/mnt/data/miniconda3/envs/py310_amd/lib/python3.10/site-packages/torch/include/THH -I/opt/rocm/core-7.14/include -I/mnt/data/miniconda3/envs/py310/include/python3.10 -c src/hip/group_norm.hip -o /tmp/tmpltpg2o2k.build-temp/src/hip/group_norm.o -D__HIP_PLATFORM_AMD__=1 -DUSE_ROCM=1 -DHIPBLAS_V2 -fPIC -DCUDA_HAS_FP16=1 -D__HIP_NO_HALF_OPERATORS__=1 -D__HIP_NO_HALF_CONVERSIONS__=1 -DHIP_ENABLE_WARP_SYNC_BUILTINS=1 -O3 --offload-arch=gfx1100 -U__HIP_NO_HALF_CONVERSIONS__ -DTORCH_API_INCLUDE_EXTENSION_H -DTORCH_EXTENSION_NAME=_native -fno-gpu-rdc -std=c++20
+  /opt/rocm/bin/amdclang++ -O2 -fPIC -fPIC -I/mnt/data/miniconda3/envs/py310_amd/lib/python3.10/site-packages/torch/include -I/mnt/data/miniconda3/envs/py310_amd/lib/python3.10/site-packages/torch/include/torch/csrc/api/include -I/mnt/data/miniconda3/envs/py310_amd/lib/python3.10/site-packages/torch/include/THH -I/opt/rocm/core-7.14/include -I/mnt/data/miniconda3/envs/py310/include/python3.10 -c src/main_rocm_hip.cpp -o /tmp/tmpltpg2o2k.build-temp/src/main_rocm_hip.o -D__HIP_PLATFORM_AMD__=1 -DUSE_ROCM=1 -DHIPBLAS_V2 -fPIC -O3 -DTORCH_API_INCLUDE_EXTENSION_H -DTORCH_EXTENSION_NAME=_native -std=c++20
+  src/main_rocm_hip.cpp:255:5: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+    255 |     hipEventCreate(&t_start);
+        |     ^~~~~~~~~~~~~~~~~~~~~~~~
+  src/main_rocm_hip.cpp:256:5: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+    256 |     hipEventCreate(&t_mid);
+        |     ^~~~~~~~~~~~~~~~~~~~~~
+  src/main_rocm_hip.cpp:257:5: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+    257 |     hipEventCreate(&t_end);
+        |     ^~~~~~~~~~~~~~~~~~~~~~
+  src/main_rocm_hip.cpp:259:5: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+    259 |     hipEventRecord(t_start, stream);
+        |     ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  src/main_rocm_hip.cpp:261:5: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+    261 |     hipEventRecord(t_mid, stream);
+        |     ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  src/main_rocm_hip.cpp:264:9: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+    264 |         hipEventDestroy(t_start);
+        |         ^~~~~~~~~~~~~~~~~~~~~~~~
+  src/main_rocm_hip.cpp:265:9: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+    265 |         hipEventDestroy(t_mid);
+        |         ^~~~~~~~~~~~~~~~~~~~~~
+  src/main_rocm_hip.cpp:266:9: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+    266 |         hipEventDestroy(t_end);
+        |         ^~~~~~~~~~~~~~~~~~~~~~
+  src/main_rocm_hip.cpp:285:5: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+    285 |     hipEventRecord(t_end, stream);
+        |     ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  src/main_rocm_hip.cpp:286:5: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+    286 |     hipEventSynchronize(t_end);
+        |     ^~~~~~~~~~~~~~~~~~~~~~~~~~
+  src/main_rocm_hip.cpp:289:5: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+    289 |     hipEventElapsedTime(&winograd_ms, t_start, t_mid);
+        |     ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  src/main_rocm_hip.cpp:290:5: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+    290 |     hipEventElapsedTime(&direct_ms, t_mid, t_end);
+        |     ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  src/main_rocm_hip.cpp:291:5: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+    291 |     hipEventDestroy(t_start);
+        |     ^~~~~~~~~~~~~~~~~~~~~~~~
+  src/main_rocm_hip.cpp:292:5: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+    292 |     hipEventDestroy(t_mid);
+        |     ^~~~~~~~~~~~~~~~~~~~~~
+  src/main_rocm_hip.cpp:293:5: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+    293 |     hipEventDestroy(t_end);
+        |     ^~~~~~~~~~~~~~~~~~~~~~
+  src/main_rocm_hip.cpp:438:9: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+    438 |         hipEventCreate(&starts[i]);
+        |         ^~~~~~~~~~~~~~~~~~~~~~~~~~
+  src/main_rocm_hip.cpp:439:9: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+    439 |         hipEventCreate(&ends[i]);
+        |         ^~~~~~~~~~~~~~~~~~~~~~~~
+  src/main_rocm_hip.cpp:446:9: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+    446 |         hipEventRecord(starts[i], stream);
+        |         ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  src/main_rocm_hip.cpp:448:9: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+    448 |         hipEventRecord(ends[i], stream);
+        |         ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  src/main_rocm_hip.cpp:450:5: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+    450 |     hipEventSynchronize(ends[kNumVariants - 1]);
+        |     ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  src/main_rocm_hip.cpp:456:9: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+    456 |         hipEventElapsedTime(&ms, starts[i], ends[i]);
+        |         ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  src/main_rocm_hip.cpp:461:9: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+    461 |         hipEventDestroy(starts[i]);
+        |         ^~~~~~~~~~~~~~~~~~~~~~~~~~
+  src/main_rocm_hip.cpp:462:9: warning: ignoring return value of type 'hipError_t' declared with 'nodiscard' attribute [-Wunused-value]
+    462 |         hipEventDestroy(ends[i]);
+        |         ^~~~~~~~~~~~~~~~~~~~~~~~
+  23 warnings generated.
+  creating /tmp/tmp2m8c28ul.build-lib/amd_tuned_torch
+  /opt/rocm/bin/amdclang++ -O2 -fPIC -pthread -B /mnt/data/miniconda3/envs/py310/compiler_compat -shared -Wl,-rpath,/opt/rocm/lib -Wl,-rpath,/opt/rocm/lib64 -O2 -fPIC /tmp/tmpltpg2o2k.build-temp/src/hip/conv2d_fp32.o /tmp/tmpltpg2o2k.build-temp/src/hip/conv3d_fp32.o /tmp/tmpltpg2o2k.build-temp/src/hip/conv3d_fp32_winograd.o /tmp/tmpltpg2o2k.build-temp/src/hip/generated/conv2d_fp16_bm128_bn128_bk32_s3.o /tmp/tmpltpg2o2k.build-temp/src/hip/generated/conv2d_fp16_bm256_bn128_bk32_s2.o /tmp/tmpltpg2o2k.build-temp/src/hip/generated/conv2d_fp16_bm256_bn64_bk32_s2.o /tmp/tmpltpg2o2k.build-temp/src/hip/generated/conv3d_fp16_bm256_bn128_bk32_s2.o /tmp/tmpltpg2o2k.build-temp/src/hip/generated/conv3d_fp16_winograd_bt8_bc8.o /tmp/tmpltpg2o2k.build-temp/src/hip/group_norm.o /tmp/tmpltpg2o2k.build-temp/src/main_rocm_hip.o -L/mnt/data/miniconda3/envs/py310_amd/lib/python3.10/site-packages/torch/lib -L/opt/rocm/core-7.14/lib -L/opt/rocm/core-7.14/hip/lib -lc10 -ltorch -ltorch_cpu -ltorch_python -lamdhip64 -lc10_hip -ltorch_hip -o /tmp/tmp2m8c28ul.build-lib/amd_tuned_torch/_native.cpython-310-x86_64-linux-gnu.so
+  copying /tmp/tmp2m8c28ul.build-lib/amd_tuned_torch/_native.cpython-310-x86_64-linux-gnu.so -> amd_tuned_torch
+  Editable install will be performed using a meta path finder.
+
+  Options like `package-data`, `include/exclude-package-data` or
+  `packages.find.exclude/include` may have no effect.
+
+  adding '__editable___amd_tuned_torch_0_2_0_finder.py'
+  adding '__editable__.amd_tuned_torch-0.2.0.pth'
+  creating '/tmp/pip-ephem-wheel-cache-eh25u42g/wheels/af/df/7d/c3ecb14c170ae5e10c6d6310d07a0236687fdc0656a3b3a7ea/tmpn2vjgmtj/.tmp-6ur9u4sv/amd_tuned_torch-0.2.0-0.editable-cp310-cp310-linux_x86_64.whl' and adding '/tmp/tmpbhufemqhamd_tuned_torch-0.2.0-0.editable-cp310-cp310-linux_x86_64.whl' to it
+  adding 'amd_tuned_torch-0.2.0.dist-info/METADATA'
+  adding 'amd_tuned_torch-0.2.0.dist-info/WHEEL'
+  adding 'amd_tuned_torch-0.2.0.dist-info/top_level.txt'
+  adding 'amd_tuned_torch-0.2.0.dist-info/RECORD'
+  /mnt/data/miniconda3/envs/py310_amd/lib/python3.10/site-packages/setuptools/command/editable_wheel.py:352: InformationOnly: Editable installation.
+  !!
+
+          ********************************************************************************
+          Please be careful with folders in your working directory with the same
+          name as your package as they may take precedence during imports.
+          ********************************************************************************
+
+  !!
+    with strategy, WheelFile(wheel_path, "w") as wheel_obj:
+  Building editable for amd_tuned_torch (pyproject.toml): finished with status 'done'
+  Created wheel for amd_tuned_torch: filename=amd_tuned_torch-0.2.0-0.editable-cp310-cp310-linux_x86_64.whl size=2929 sha256=d0fe58aa15eda1fb7161f795ffb3f3d2916c6b3bf1ed05a0089bafbe576ec34f
+  Stored in directory: /tmp/pip-ephem-wheel-cache-eh25u42g/wheels/af/df/7d/c3ecb14c170ae5e10c6d6310d07a0236687fdc0656a3b3a7ea
+Successfully built amd_tuned_torch
+Installing collected packages: amd_tuned_torch
+  Attempting uninstall: amd_tuned_torch
+    Found existing installation: amd_tuned_torch 0.2.0
+    Uninstalling amd_tuned_torch-0.2.0:
+      Removing file or directory /mnt/data/miniconda3/envs/py310_amd/lib/python3.10/site-packages/__editable__.amd_tuned_torch-0.2.0.pth
+      Removing file or directory /mnt/data/miniconda3/envs/py310_amd/lib/python3.10/site-packages/__editable___amd_tuned_torch_0_2_0_finder.py
+      Removing file or directory /mnt/data/miniconda3/envs/py310_amd/lib/python3.10/site-packages/__pycache__/__editable___amd_tuned_torch_0_2_0_finder.cpython-310.pyc
+      Removing file or directory /mnt/data/miniconda3/envs/py310_amd/lib/python3.10/site-packages/amd_tuned_torch-0.2.0.dist-info/
+      Successfully uninstalled amd_tuned_torch-0.2.0
+Successfully installed amd_tuned_torch-0.2.0

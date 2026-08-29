@@ -1,0 +1,482 @@
+// Hand-written implicit-GEMM Conv2d (FP16, WMMA matrix-core tiled) for
+// amd_tuned_torch on ROCm/RDNA3 (RX 7900 XTX, gfx1100). Ported from the
+// original CMP-Turing project's CUDA kernel
+// (src/cuda/kernel_example/fp16_conv.cu).
+//
+// This is a tools/kernelgen TEMPLATE, not a compiled source file -- the
+// actual .cu files live under src/cuda/generated/conv2d_fp16_*.cu, one per
+// tile shape listed in tools/kernelgen/variants.py, each rendered from
+// this file by tools/kernelgen/generate.py substituting $$BM/$$BN/$$BK/
+// $$STAGES/$$SUFFIX. Edit this template (and re-run generate.py) rather
+// than hand-editing a generated .cu -- see the repo README's "generated/
+// pipeline" section.
+//
+// UPDATE: the original CUDA source's header framed this as a "TENSOR CORE"
+// kernel, but the first HIP port only ever used a plain register-blocked
+// GEMM (half2 vector FMA, __hfma2) -- no wmma::fragment/mma anywhere. This
+// revision closes that gap: the per-warp compute step now issues gfx1100's
+// real WMMA matrix-core instructions through rocWMMA's fragment API
+// (rocwmma::fragment / load_matrix_sync / mma_sync), which RDNA3 added as
+// dedicated AI-accelerator matrix units (16x16x16 FP16xFP16->FP32 tiles,
+// one wavefront-collective op per tile) -- a real throughput win over
+// scalar HFMA2, not a naming-only fix. Building this needs rocWMMA
+// (rocwmma-dev / the rocWMMA headers) on the include path -- see
+// ../../../setup.py and README.md's "Build prerequisites".
+//
+// Implicit GEMM: M = output pixels (B*H_out*W_out), N = C_out, K = C_in*KH*KW.
+// A-tile (im2col'd input) and B-tile (weight, already [C_out, C_in*KH*KW]
+// GEMM-layout) are staged through shared memory with STAGES-deep double
+// buffering to overlap the next tile's load with the current tile's
+// compute -- this staging (LOAD_A/LOAD_B, the prologue/main-loop shape) is
+// unchanged from the original register-blocked version; only what reads
+// the staged tiles changed.
+//
+// Each warp (32 lanes, arithmetic grouping only -- not a wavefront-width
+// assumption, see group_norm.cu) owns a 32x32 output sub-tile, i.e. a 2x2
+// grid of 16x16x16 WMMA fragments. The BK inner axis is walked in
+// WMMA_K=16 chunks; each chunk does one mma_sync per (m,n) fragment,
+// accumulating in FP32 across the whole K reduction.
+//
+// Epilogue: rocWMMA's store_matrix_sync can't target the
+// [B,C_out,H_out,W_out] output directly -- pixels aren't contiguous with
+// channels the way a plain GEMM C matrix is, so it isn't a row/col-major
+// matrix store_matrix_sync understands. Instead each warp first
+// store_matrix_sync's its FP32 fragments into a small LDS scratch buffer
+// (reinterpreting the now-dead As/Bs region -- see the launcher for why
+// this always fits), then every thread in the block scatters that buffer
+// into global memory with the bias add and FP32->FP16 cast. Warps are
+// epilogued one BM-row-of-warps at a time so the scratch buffer's size
+// depends only on BN, not BM, with a __syncthreads() between passes.
+//
+// Tile shape (BM=$BM, BN=$BN, BK=$BK, STAGES=$STAGES for this generated
+// file) is fixed at codegen time, not build time -- see the template note
+// above. BLOCK_SIZE is derived from BM/BN, not a free parameter -- every
+// warp covers a fixed 32x32 output sub-tile, so the block must contain
+// exactly (BM/32)*(BN/32) warps. BK must be a multiple of WMMA_K (16);
+// BM/BN must be multiples of 32 (checked below with static_assert).
+#include <hip/hip_runtime.h>
+#include <hip/hip_fp16.h>
+#include <rocwmma/rocwmma.hpp>
+
+#define BM $BM
+#define BN $BN
+#define BK $BK
+#define STAGES $STAGES
+
+// WMMA tile shape -- fixed by gfx1100's matrix-core ISA (16x16x16 is the
+// only FP16-input/FP32-accumulate WMMA size RDNA3 supports).
+#define WMMA_M 16
+#define WMMA_N 16
+#define WMMA_K 16
+
+// Each warp's 32x32 output sub-tile is a 2x2 grid of WMMA_M x WMMA_N tiles.
+#define WARP_TILES_M 2
+#define WARP_TILES_N 2
+// Flat iteration count over that 2x2 grid -- accum[][]/fragA[]/fragB[] are
+// indexed back out of a single loop variable (i = t/WARP_TILES_N, j =
+// t%WARP_TILES_N) wherever both dimensions are walked together, instead of
+// nesting two #pragma unroll loops.
+#define WARP_TILES (WARP_TILES_M * WARP_TILES_N)
+
+// Shared memory padding to reduce bank conflicts
+#define PAD 8
+
+// Epilogue scratch-buffer row padding, in floats. The epilogue reads that
+// buffer down a column (one lane per output pixel/voxel -- see the
+// epilogue itself), so the row stride must not be a multiple of the
+// 32-bank LDS stride, or every lane collides on one bank. 1 float is
+// enough: it makes the stride odd, hence coprime with 32.
+#define EPI_PAD 1
+
+// Derived: one warp per 32x32 output sub-tile, (BM/32)x(BN/32) warps/block.
+#define BLOCK_SIZE ((BM / 32) * (BN / 32) * 32)
+
+// Total int4 (8-half) loads needed to fill the BMxBK / BKxBN smem tiles.
+#define A_TILE_INT4 (BM * (BK / 8))
+#define B_TILE_INT4 (BK * (BN / 8))
+
+namespace {
+
+using rocwmma::matrix_a;
+using rocwmma::matrix_b;
+using rocwmma::accumulator;
+using rocwmma::row_major;
+using rocwmma::float16_t;
+using rocwmma::float32_t;
+using rocwmma::mem_row_major;
+
+static_assert(BM % 32 == 0, "BM must be a multiple of 32");
+static_assert(BN % 32 == 0, "BN must be a multiple of 32");
+static_assert(BK % WMMA_K == 0, "BK must be a multiple of 16");
+
+// A-tile [M,K] and B-tile [K,N] are both staged row-major (As: row=pixel,
+// col=k; Bs: row=k, col=channel), matching wmma's row_major convention for
+// both matrix_a and matrix_b directly -- no transposition needed.
+using FragA   = rocwmma::fragment<matrix_a, WMMA_M, WMMA_N, WMMA_K, float16_t, row_major>;
+using FragB   = rocwmma::fragment<matrix_b, WMMA_M, WMMA_N, WMMA_K, float16_t, row_major>;
+using FragAcc = rocwmma::fragment<accumulator, WMMA_M, WMMA_N, WMMA_K, float32_t>;
+
+__global__ void __launch_bounds__(BLOCK_SIZE) conv2d_fp16_kernel_$SUFFIX(
+    const half* __restrict__ input,     // [B, C_in, H_in, W_in]
+    const half* __restrict__ weight,    // [C_out, C_in*KH*KW]  (GEMM-layout)
+    const half* __restrict__ bias,
+    half* __restrict__ output,          // [B, C_out, H_out, W_out]
+    int B, int C_in, int H_in, int W_in,
+    int C_out, int K_H, int K_W,
+    int H_out, int W_out,
+    int s_h, int s_w, int p_h, int p_w, int d_h, int d_w)
+{
+    extern __shared__ char smem_raw[];
+
+    // As: [STAGES][BM][BK + PAD]
+    half (*As)[BM][BK + PAD] = reinterpret_cast<half (*)[BM][BK + PAD]>(smem_raw);
+
+    // Bs: [STAGES][BK][BN + PAD]
+    half (*Bs)[BK][BN + PAD] = reinterpret_cast<half (*)[BK][BN + PAD]>(
+        smem_raw + STAGES * BM * (BK + PAD) * sizeof(half));
+
+    // Per-warp accumulator: 2x2 grid of 16x16 FP32 fragments (32x32 output).
+    FragAcc accum[WARP_TILES_M][WARP_TILES_N];
+    #pragma unroll
+    for (int t = 0; t < WARP_TILES; t++)
+        rocwmma::fill_fragment(accum[t / WARP_TILES_N][t % WARP_TILES_N], 0.0f);
+
+    int tid = threadIdx.x;
+    int bx  = blockIdx.x;   // Output channel block
+    int by  = blockIdx.y;   // Pixel block
+
+    int warp_id = tid / 32;
+
+    int warp_n_count = BN / 32;
+    int warp_m = warp_id / warp_n_count;   // 0 .. (BM/32 - 1)
+    int warp_n = warp_id % warp_n_count;   // 0 .. (BN/32 - 1)
+
+    int block_pixel_start   = by * BM;
+    int block_channel_start = bx * BN;
+
+    int total_pixels = B * H_out * W_out;
+    int total_k      = C_in * K_H * K_W;
+    int stride_hw    = H_out * W_out;
+    int stride_chw   = C_out * stride_hw;
+
+    int max_k_tiles = (total_k + BK - 1) / BK;
+
+    // Grid-stride load of one A/B tile into smem stage s at GEMM-K offset
+    // k_base. Correct for any BM/BN/BK/BLOCK_SIZE combination (a thread may
+    // visit 0, 1, or several int4 slots depending on how the tile size
+    // compares to BLOCK_SIZE). Flat K index decomposes to (c_in, kh, kw).
+// PERF: the flat GEMM-K index ck decomposes to (kc, ku, kv) as a plain
+// mixed-radix counter -- kv is the fastest axis, wrapping at K_W into ku,
+// which wraps at K_H into kc. The original port re-derived that
+// decomposition from scratch for EVERY ONE of the 8 halves in the int4
+// (ck % K_W, ck / K_W, % K_H, / K_H), which on gfx1100 is four
+// divisions by a runtime value -- there is no hardware integer divide, so
+// each expands to a ~20-instruction reciprocal sequence. At
+// tools/bench.py's conv2d shape that was ~6e9 integer divisions of pure
+// address math for 155 GFLOP of actual work, and it, not memory
+// bandwidth or WMMA throughput, was what held this kernel to ~14% of the
+// card's fp16 peak.
+//
+// Here the counter is decomposed ONCE per int4 slot and then carried
+// forward one step at a time (++kv, wrap into ++ku, wrap into ++kc),
+// which is exactly equivalent -- ck increases by 1 per v, so at most one
+// carry can propagate per step -- at a cost of two compares instead of
+// four divisions. The input offset rides along as three running partial
+// sums (c_off/h_off/w_in) advanced by the same carries, so the address
+// needs no multiplies in the inner loop either. Everything invariant
+// across v (the pixel decomposition, hence the batch base offset and the
+// h/w window origins) is hoisted above the loop, where it was already
+// being computed once per slot.
+#define LOAD_A(s, k_base)                                                   \
+    do {                                                                     \
+        for (int _i = tid; _i < A_TILE_INT4; _i += BLOCK_SIZE) {            \
+            int a_row = _i / (BK / 8);                                      \
+            int a_col = (_i % (BK / 8)) * 8;                                \
+            int4 lv = make_int4(0,0,0,0);                                   \
+            half* vd = reinterpret_cast<half*>(&lv);                        \
+            int pixel_idx = block_pixel_start + a_row;                      \
+            bool valid_pixel = (pixel_idx < total_pixels);                  \
+            int kb = (k_base) + a_col;                                      \
+            if (valid_pixel && kb < total_k) {                              \
+                int p_b_idx = pixel_idx / stride_hw;                        \
+                int rem     = pixel_idx % stride_hw;                        \
+                int p_h_out = rem / W_out;                                  \
+                int p_w_out = rem % W_out;                                  \
+                int hw      = H_in * W_in;                                   \
+                int in_base = (p_b_idx * C_in) * hw;                        \
+                int h_org   = p_h_out * s_h - p_h;                          \
+                int w_org   = p_w_out * s_w - p_w;                          \
+                int h_org_w = h_org * W_in;                                  \
+                int dh_w    = d_h * W_in;                                    \
+                int tmp = kb;                                                \
+                int kv  = tmp % K_W; tmp /= K_W;                            \
+                int ku  = tmp % K_H;                                         \
+                int kc  = tmp / K_H;                                         \
+                int c_off = kc * hw;                                         \
+                int h_in  = h_org + ku * d_h;                                \
+                int h_off = h_org_w + (ku * dh_w);                          \
+                int w_in  = w_org + kv * d_w;                                \
+                _Pragma("unroll")                                            \
+                for (int v = 0; v < 8; ++v) {                               \
+                    if (kb + v < total_k) {                                  \
+                        if (h_in >= 0 && h_in < H_in && w_in >= 0 && w_in < W_in) \
+                            vd[v] = input[in_base + c_off + h_off + w_in];   \
+                        w_in += d_w;                                         \
+                        if (++kv == K_W) {                                   \
+                            kv = 0; w_in = w_org;                            \
+                            h_in += d_h; h_off += dh_w;                     \
+                            if (++ku == K_H) {                               \
+                                ku = 0; h_in = h_org; h_off = h_org_w;      \
+                                c_off += hw;                                 \
+                            }                                                \
+                        }                                                    \
+                    }                                                        \
+                }                                                            \
+            }                                                                \
+            *reinterpret_cast<int4*>(&As[(s)][a_row][a_col]) = lv;          \
+        }                                                                    \
+    } while(0)
+
+#define LOAD_B(s, k_base)                                                   \
+    do {                                                                     \
+        for (int _i = tid; _i < B_TILE_INT4; _i += BLOCK_SIZE) {            \
+            int b_row = _i / (BN / 8);                                      \
+            int b_col = (_i % (BN / 8)) * 8;                                \
+            int gn = block_channel_start + b_col;                          \
+            int gk = (k_base) + b_row;                                     \
+            int4 lv = make_int4(0,0,0,0);                                   \
+            half* vd = reinterpret_cast<half*>(&lv);                        \
+            if (gn < C_out && gk < total_k) {                               \
+                _Pragma("unroll")                                            \
+                for (int v = 0; v < 8; ++v) {                               \
+                    int cn = gn + v;                                         \
+                    if (cn < C_out)                                          \
+                        vd[v] = weight[cn * total_k + gk];                  \
+                }                                                            \
+            }                                                                \
+            *reinterpret_cast<int4*>(&Bs[(s)][b_row][b_col]) = lv;          \
+        }                                                                    \
+    } while(0)
+
+    // Prologue: fill stage 0
+    if (max_k_tiles > 0) {
+        LOAD_A(0, 0);
+        LOAD_B(0, 0);
+        __syncthreads();
+    }
+
+    // Main loop -- genuinely double-buffered: ONE barrier per iteration,
+    // after both the prefetch and the compute.
+    //
+    // PERF: this used to carry a second barrier between the prefetch and
+    // the compute, which defeated the entire point of the staging. The
+    // prefetch writes stage (k_step+1)%STAGES while the compute reads
+    // stage k_step%STAGES -- disjoint memory, so nothing about the pair
+    // needs ordering against each other. With a barrier between them,
+    // every wave in the block had to land its global->LDS copies before
+    // ANY wave could start that iteration's WMMA, so global-memory
+    // latency and matrix-core throughput were strictly serialized (and
+    // RDNA3 has no async global->LDS copy to soften that -- see
+    // variants.py's note on STAGES). Removing it lets the other waves'
+    // WMMA work cover this wave's load latency, which is the only
+    // overlap mechanism available here.
+    //
+    // The single trailing barrier is what makes the pipeline safe, and it
+    // is sufficient: it publishes the prefetched stage to every thread
+    // AND guarantees all reads of the stage just computed on are complete
+    // before a later iteration's prefetch reuses that slot (STAGES=2: two
+    // iterations later; STAGES=3: three). Correct for the first iteration
+    // too, since the prologue's own barrier already published stage 0.
+    for (int k_step = 0; k_step < max_k_tiles; k_step++) {
+        int compute_idx = k_step       % STAGES;   // stage to READ
+        int load_idx    = (k_step + 1) % STAGES;   // stage to WRITE next tile
+
+        if (k_step + 1 < max_k_tiles) {
+            int next_k = (k_step + 1) * BK;
+            LOAD_A(load_idx, next_k);
+            LOAD_B(load_idx, next_k);
+        }
+
+        // Compute the warp's 32x32 output sub-tile via WMMA, walking BK in
+        // WMMA_K=16 chunks. As/Bs are row-major with ld = BK+PAD / BN+PAD
+        // respectively, matching wmma's row_major layout directly.
+        #pragma unroll
+        for (int k16 = 0; k16 < BK; k16 += WMMA_K) {
+            FragA fragA[WARP_TILES_M];
+            FragB fragB[WARP_TILES_N];
+
+            #pragma unroll
+            for (int i = 0; i < WARP_TILES_M; i++)
+                rocwmma::load_matrix_sync(
+                    fragA[i],
+                    reinterpret_cast<const float16_t*>(&As[compute_idx][warp_m * 32 + i * WMMA_M][k16]),
+                    BK + PAD);
+
+            #pragma unroll
+            for (int j = 0; j < WARP_TILES_N; j++)
+                rocwmma::load_matrix_sync(
+                    fragB[j],
+                    reinterpret_cast<const float16_t*>(&Bs[compute_idx][k16][warp_n * 32 + j * WMMA_N]),
+                    BN + PAD);
+
+            #pragma unroll
+            for (int t = 0; t < WARP_TILES; t++) {
+                int i = t / WARP_TILES_N, j = t % WARP_TILES_N;
+                rocwmma::mma_sync(accum[i][j], fragA[i], fragB[j], accum[i][j]);
+            }
+        }
+
+        __syncthreads();
+    }
+
+#undef LOAD_A
+#undef LOAD_B
+
+    // Epilogue -- see header comment: stage through a small LDS scratch
+    // buffer (aliasing the dead As/Bs region), one BM-row-of-warps per
+    // pass, then scatter to global memory with bias-add + FP32->FP16 cast.
+    float (*epi)[BN + EPI_PAD] = reinterpret_cast<float (*)[BN + EPI_PAD]>(smem_raw);
+
+    for (int pass = 0; pass < BM / 32; pass++) {
+        if (warp_m == pass) {
+            #pragma unroll
+            for (int t = 0; t < WARP_TILES; t++) {
+                int i = t / WARP_TILES_N, j = t % WARP_TILES_N;
+                rocwmma::store_matrix_sync(
+                    &epi[i * WMMA_M][warp_n * 32 + j * WMMA_N],
+                    accum[i][j], BN + EPI_PAD, mem_row_major);
+            }
+        }
+        __syncthreads();
+
+        // PERF: the lane index walks r (the output PIXEL), not c (the
+        // output channel). Output is [B, C_out, H_out, W_out], so
+        // consecutive pixels are consecutive in memory while consecutive
+        // channels are H_out*W_out apart -- the original c-major walk had
+        // all 32 lanes of a wave storing 2 bytes each to 32 addresses
+        // 32KB apart, i.e. one whole cache line touched per lane per
+        // store, for every output element in the tensor. Pixel-major makes
+        // each wave's 32 stores one contiguous 64-byte run instead.
+        //
+        // That inverts the LDS access, which is what EPI_PAD is for:
+        // reading epi[r][c] down a column with ld = BN would put every
+        // lane on the same bank at every BN this kernel is generated for.
+        // n_idx also becomes wave-uniform, making the bias fetch a
+        // broadcast rather than a 32-lane gather.
+        for (int idx = tid; idx < 32 * BN; idx += BLOCK_SIZE) {
+            int r = idx % 32;
+            int c = idx / 32;
+            int m_idx = block_pixel_start + pass * 32 + r;
+            int n_idx = block_channel_start + c;
+            if (m_idx < total_pixels && n_idx < C_out) {
+                float val = epi[r][c];
+                if (bias) val += __half2float(bias[n_idx]);
+                int b_idx = m_idx / stride_hw;
+                int rem   = m_idx % stride_hw;
+                output[b_idx * stride_chw + n_idx * stride_hw + rem] = __float2half(val);
+            }
+        }
+
+        __syncthreads();  // all reads of epi[] done before next pass overwrites it
+    }
+}
+
+// Dynamic shared-memory footprint for this variant's tile shape -- a
+// single source of truth shared by the launcher (which needs it to size
+// the kernel launch) and conv2d_fp16_diagnostics_$SUFFIX below (which
+// needs it, alongside register usage, to compute achievable occupancy).
+// epi_bytes is max()'d in rather than assumed to fit inside as+bs because
+// that's only guaranteed for some BM/BN/BK/STAGES combinations, not all
+// of them (see tools/kernelgen/variants.py for this variant's actual
+// BM/BN/BK/STAGES).
+int conv2d_fp16_smem_bytes_$SUFFIX() {
+    int as_bytes  = STAGES * BM * (BK + PAD) * sizeof(half);
+    int bs_bytes  = STAGES * BK * (BN + PAD) * sizeof(half);
+    int epi_bytes = 32 * (BN + EPI_PAD) * (int)sizeof(float);
+    int total_smem = as_bytes + bs_bytes;
+    if (epi_bytes > total_smem) total_smem = epi_bytes;
+    return total_smem;
+}
+
+}  // namespace
+
+void launch_conv2d_fp16_$SUFFIX(
+    const void* input, const void* weight, const void* bias, void* output,
+    int B, int C_in, int H_in, int W_in,
+    int C_out, int K_H, int K_W,
+    int H_out, int W_out,
+    int stride_h, int stride_w, int pad_h, int pad_w, int dil_h, int dil_w,
+    hipStream_t stream)
+{
+    const half* input_ptr  = reinterpret_cast<const half*>(input);
+    const half* weight_ptr = reinterpret_cast<const half*>(weight);
+    const half* bias_ptr   = reinterpret_cast<const half*>(bias);
+    half*       output_ptr = reinterpret_cast<half*>(output);
+
+    int m = B * H_out * W_out;
+    int n = C_out;
+
+    dim3 block(BLOCK_SIZE);
+    dim3 grid((n + BN - 1) / BN,
+              (m + BM - 1) / BM);
+
+    int total_smem = conv2d_fp16_smem_bytes_$SUFFIX();
+
+    // No AMD equivalent of CUDA's shared-memory carveout (cudaFuncAttribute-
+    // PreferredSharedMemoryCarveout) -- AMD's LDS is a fixed-size block, not
+    // reconfigurably split with L1 the way NVIDIA's is. Only the dynamic
+    // shared-memory size opt-in has a HIP analog.
+    static bool smem_attrs_set = false;
+    if (!smem_attrs_set) {
+        // (void): ROCm 7 marks hipError_t [[nodiscard]]. A failure here
+        // would mean the dynamic-LDS opt-in didn't take, which the very next
+        // launch reports through hipGetLastError() at the dispatch layer --
+        // there is nothing useful to do with the status at this point.
+        (void)hipFuncSetAttribute(reinterpret_cast<const void*>(conv2d_fp16_kernel_$SUFFIX),
+                                   hipFuncAttributeMaxDynamicSharedMemorySize, total_smem);
+        smem_attrs_set = true;
+    }
+
+    hipLaunchKernelGGL((conv2d_fp16_kernel_$SUFFIX), grid, block, total_smem, stream,
+                        input_ptr, weight_ptr, bias_ptr, output_ptr,
+                        B, C_in, H_in, W_in,
+                        C_out, K_H, K_W, H_out, W_out,
+                        stride_h, stride_w, pad_h, pad_w, dil_h, dil_w);
+}
+
+// ---------------------------------------------------------------------
+// Diagnostics: static VGPR count and achievable occupancy for this
+// variant's kernel, queried via standard HIP runtime introspection
+// (hipFuncGetAttributes / hipOccupancyMaxActiveBlocksPerMultiprocessor)
+// -- not computed by the kernel itself, just read back off the already-
+// compiled binary. Exists so tools/kernelgen/autotune.py can report
+// register pressure/occupancy alongside timing per variant, and flag a
+// candidate that can't even reach 1 resident block/CU (max_active_blocks_per_cu
+// == 0) as a launch-failure risk, not just a slow one. See
+// amd_tuned_torch.__init__ / that script for how this gets used --
+// deliberately NOT wired into run_conv2d_fp16's live dispatch: measured
+// wall-clock time (what that dispatch already selects on) already
+// reflects whatever penalty low occupancy causes, so this is a
+// diagnostic/design-time signal, not a second, competing selection
+// criterion.
+// ---------------------------------------------------------------------
+void conv2d_fp16_diagnostics_$SUFFIX(
+    int* num_regs, int* static_lds_bytes, int* dynamic_lds_bytes, int* max_active_blocks_per_cu)
+{
+    hipFuncAttributes attr;
+    (void)hipFuncGetAttributes(&attr, reinterpret_cast<const void*>(conv2d_fp16_kernel_$SUFFIX));
+
+    int dynamic_smem = conv2d_fp16_smem_bytes_$SUFFIX();
+
+    *num_regs          = attr.numRegs;
+    *static_lds_bytes  = (int)attr.sharedSizeBytes;
+    *dynamic_lds_bytes = dynamic_smem;
+
+    // (void): out-param is pre-zeroed by the caller contract below; a
+    // failed query reports 0 blocks/CU, which autotune.py already treats as
+    // the "can't reach 1 resident block" red flag.
+    (void)hipOccupancyMaxActiveBlocksPerMultiprocessor(
+        max_active_blocks_per_cu,
+        reinterpret_cast<const void*>(conv2d_fp16_kernel_$SUFFIX),
+        BLOCK_SIZE, dynamic_smem);
+}

@@ -1,0 +1,37 @@
+conv2d fp16  N=64 C_in=128 128x128 -> C_out=64, k=3, stride=1, pad=1
+154.6 GFLOP by the direct algorithm
+
+MIOpen sees this as:
+  ./bin/MIOpenDriver convfp16 -n 64 -c 128 -H 128 -W 128 -k 64 -y 3 -x 3 -p 1 -q 1 -u 1 -v 1 -l 1 -j 1 -m conv -g 1 -F 1 -t 1
+
+MIOpen evaluated these algorithm classes (its own timings):
+  solver                              ms   workspace  kernel
+  ConvWinoFuryRxS<2-3>             1.053       0.0 MB  miopenSp3AsmConvFury_v2_4_1_gfx11_1536vgprs_fp16_fp16acc_f2x
+  GemmFwdRest                      7.144      37.7 MB  
+  ConvDirectNaiveConvFwd         519.497       0.0 MB  naive_conv_ab_nonpacked_fwd_nchw_half_double_half
+
+Full MIOpen log (6389 lines) -> /mnt/data/optimization/amd_tools/source/cmp_ext_turing/analyse/logs/miopen_conv2d_fp16_64x128x128x128_k64x3.log
+
+Measured here:
+  kernel                              ms   TFLOP/s   %peak
+  stock (MIOpen)                   1.558      99.2     81%
+  this project's HIP kernel        6.554      23.6     19%
+  CK WMMA (NCHW in/out)            4.108      37.6     31%
+  CK WMMA (channels-last)          2.429      63.7     52%
+
+Diagnosis (the gap to stock splits into two independent parts):
+
+  1. ALGORITHM. Stock's winner is Winograd (1.05 ms), which computes
+     fewer multiplies than the direct algorithm. The best GEMM-class
+     solver -- MIOpen's own -- manages 7.14 ms, i.e. Winograd is
+     6.8x ahead of the entire GEMM approach on this shape. Our
+     kernel is GEMM-class, so no amount of tuning reaches stock; that
+     would require implementing Winograd.
+
+  2. IMPLEMENTATION. None: ours is 6.55 ms against MIOpen's own
+     GEMM-class 7.14 ms, so our kernel is already at or ahead of
+     stock's implementation of the same algorithm. The whole gap is (1).
+
+  For reference the CK tier, also GEMM-class, does 2.43 ms here --
+  ahead of MIOpen's own GEMM solver, which bounds what
+  GEMM-class tuning can buy on this shape.

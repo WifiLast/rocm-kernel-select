@@ -1,0 +1,10 @@
+conv2d fp16, N=64 C_in=128 128x128 -> C_out=64 k=3 (variant bm256_bn64_bk32_s2)
+standalone harness, no torch; min of 3 runs each
+
+BASELINE (current kernel)          6.552 ms (min of 3)
+ - no global input read (addr math kept) 2.715 ms (min of 3)
+ - no LOAD_A body at all           2.693 ms (min of 3)
+ - no WMMA mma_sync                5.188 ms (min of 3)
+ - no output store                 6.429 ms (min of 3)
+ - no gather + no WMMA (skeleton only) 1.044 ms (min of 3)
+ - REVERT epilogue coalescing      7.153 ms (min of 3)

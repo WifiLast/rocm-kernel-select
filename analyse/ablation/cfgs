@@ -1,0 +1,7 @@
+BASELINE (current kernel)|
+ - no global input read (addr math kept)|-DABL_NO_GLOAD
+ - no LOAD_A body at all|-DABL_NO_ADDR
+ - no WMMA mma_sync|-DABL_NO_WMMA
+ - no output store|-DABL_NO_OSTORE
+ - no gather + no WMMA (skeleton only)|-DABL_NO_GLOAD -DABL_NO_WMMA
+ - REVERT epilogue coalescing|-DABL_OLD_EPI
