@@ -41,12 +41,15 @@
 
 #include "dispatch_common.h"
 
-#ifdef AMD_TUNED_TORCH_HAS_CK
-#include "ck_conv_torch.hpp"
-#include "ck_gemm_torch.hpp"
-#include "ck_norm_torch.hpp"
-#include "hipblaslt_gemm.hpp"
-#endif
+// Composable Kernel and hipBLASLt bindings used to live in this file's own
+// PYBIND11_MODULE, gated by #ifdef -- but that meant all three tiers (this
+// core one, CK, hipBLASLt) linked into ONE .so, so touching CK code (~94%
+// of a full build's CPU time) forced a relink of this file's own
+// group_norm/conv2d/conv3d bindings too, and vice versa. They now live in
+// their own independent extensions -- see src/ck_native.cpp and
+// src/hipblaslt_native.cpp, each with its own PYBIND11_MODULE, built as
+// amd_tuned_torch._native_ck / amd_tuned_torch._native_hipblaslt (see
+// setup.py). This file no longer includes or binds either tier at all.
 
 // ------------------------------------------------------------------
 // Launchers (src/cuda/group_norm.cu, conv2d_fp32.cu, conv3d_fp{16,32}.cu,
@@ -639,6 +642,56 @@ torch::Tensor custom_conv2d_forward(torch::Tensor input, torch::Tensor weight,
 // winner's occupancy isn't obviously better than a loser's).
 // ------------------------------------------------------------------
 
+torch::Tensor conv2d_fp16_run_variant(
+    int64_t variant_idx, torch::Tensor input, torch::Tensor weight,
+    c10::optional<torch::Tensor> bias,
+    std::vector<int64_t> stride, std::vector<int64_t> padding, std::vector<int64_t> dilation) {
+    // Debug/bisection tool only -- calls ONE specific tile-shape variant
+    // directly, bypassing run_conv2d_fp16's benchmark-and-cache dispatch
+    // entirely (no timing, no winner caching, no correctness check). Exists
+    // so a numerical mismatch caught by amd_tuned_torch.kernel_select's
+    // native-vs-stock verification (which only ever sees "native" as a
+    // whole, i.e. whichever variant run_conv2d_fp16 happened to pick as
+    // fastest for that shape) can be bisected to a specific variant --
+    // compare this function's output against F.conv2d for each variant_idx
+    // in turn to find out whether the bug is in code shared by every
+    // variant (the LOAD_A/LOAD_B macros, the epilogue -- all defined once
+    // in src/cuda/templates/conv2d_fp16.cu.tmpl) or specific to one
+    // variant's BM/BN/BK/STAGES combination.
+    TORCH_CHECK(input.is_contiguous() && weight.is_contiguous(), "Input/weight must be contiguous");
+    TORCH_CHECK(input.dim() == 4 && weight.dim() == 4, "Conv2d expects 4D input/weight (NCHW/[O,I,kH,kW])");
+    TORCH_CHECK(input.dtype() == torch::kFloat16 && weight.dtype() == torch::kFloat16,
+                "conv2d_fp16_run_variant is fp16-only (the WMMA kernel; conv2d's fp32 path has "
+                "only one implementation, nothing to bisect)");
+    constexpr int kNumVariants = sizeof(kConv2dFp16Variants) / sizeof(kConv2dFp16Variants[0]);
+    TORCH_CHECK(variant_idx >= 0 && variant_idx < kNumVariants,
+                "variant_idx out of range (0..", kNumVariants - 1, ")");
+
+    int64_t B = input.size(0), C_in = input.size(1), H_in = input.size(2), W_in = input.size(3);
+    int64_t C_out = weight.size(0), K_H = weight.size(2), K_W = weight.size(3);
+    TORCH_CHECK(weight.size(1) == C_in, "weight.size(1) must equal input channels (groups=1 only)");
+
+    int64_t H_out = conv_out_size(H_in, K_H, stride[0], padding[0], dilation[0]);
+    int64_t W_out = conv_out_size(W_in, K_W, stride[1], padding[1], dilation[1]);
+    TORCH_CHECK(H_out > 0 && W_out > 0, "Conv2d output size must be positive");
+
+    const void* bias_ptr = nullptr;
+    if (bias.has_value() && bias->defined()) {
+        TORCH_CHECK(bias->size(0) == C_out && bias->dtype() == input.dtype(), "Bias shape/dtype mismatch");
+        bias_ptr = bias->contiguous().data_ptr();
+    }
+
+    auto output = torch::empty({B, C_out, H_out, W_out}, input.options());
+    kConv2dFp16Variants[variant_idx](
+        input.data_ptr(), weight.data_ptr(), bias_ptr, output.data_ptr(),
+        (int)B, (int)C_in, (int)H_in, (int)W_in,
+        (int)C_out, (int)K_H, (int)K_W, (int)H_out, (int)W_out,
+        (int)stride[0], (int)stride[1], (int)padding[0], (int)padding[1],
+        (int)dilation[0], (int)dilation[1],
+        current_stream());
+    return output;
+}
+
 c10::optional<int64_t> conv2d_fp16_cached_variant(
         int64_t B, int64_t C_in, int64_t H_in, int64_t W_in,
         int64_t C_out, int64_t K_H, int64_t K_W,
@@ -797,50 +850,10 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.def("group_norm", &custom_group_norm_forward, "Hand-written HIP GroupNorm");
     m.def("conv2d", &custom_conv2d_forward, "Hand-written HIP Conv2d (fp16/fp32, groups=1)");
     m.def("conv3d", &custom_conv3d_forward, "Hand-written HIP Conv3d (fp16/fp32, groups=1)");
-#ifdef AMD_TUNED_TORCH_HAS_CK
-    // Composable Kernel WMMA conv tier -- fp16/bf16, conv2d and conv3d.
-    // Returns None when no CK instance supports the problem so the caller
-    // can fall back (see amd_tuned_torch/ck_ops.py).
-    m.def("ck_conv", &ck_conv_forward,
-          "Composable Kernel WMMA grouped-conv forward (fp16/bf16, 2D/3D, groups=1); "
-          "None if unsupported");
-    // CK normalization tier -- GroupNorm with SiLU optionally fused into
-    // the same kernel (src/cuda/ck_norm_fwd.hpp explains why the fused
-    // form is the point and plain GroupNorm is the side effect).
-    m.def("ck_group_norm", &ck_group_norm_forward,
-          "Composable Kernel GroupNorm, optionally with SiLU fused into the "
-          "epilogue (fp16/bf16/fp32, rank 4/5, affine only); None if unsupported",
-          py::arg("input"), py::arg("num_groups"), py::arg("weight"), py::arg("bias"),
-          py::arg("eps"), py::arg("fuse_silu") = false);
-    // CK WMMA GEMM tier -- a third F.linear candidate, with bias and
-    // activation fused into the epilogue (src/cuda/ck_gemm_fwd.hpp).
-    m.def("ck_gemm_linear", &ck_gemm_linear,
-          "Composable Kernel WMMA Y = X @ W^T (+ bias) with an optional fused "
-          "GELU/SiLU epilogue (fp16/bf16); None if unsupported",
-          py::arg("input"), py::arg("weight"), py::arg("bias") = py::none(),
-          py::arg("epilogue") = 0);
-    m.def("has_ck", []() { return true; }, "Whether the CK conv tier was compiled in");
-#else
-    m.def("has_ck", []() { return false; }, "Whether the CK conv tier was compiled in");
-#endif
-#ifdef AMD_TUNED_TORCH_HAS_HIPBLASLT
-    // hipBLASLt GEMM tier -- see src/hipblaslt_gemm.hpp for why
-    // linear/matmul/bmm have a non-stock candidate at all now. Both return
-    // None when the installed logic has no kernel for the problem, same
-    // convention as ck_conv above.
-    m.def("hipblaslt_linear", &hipblaslt_linear,
-          "hipBLASLt Y = X @ W^T (+ bias) with an optional fused GELU/SiLU/ReLU "
-          "epilogue (fp16/bf16/fp32); None if unsupported",
-          py::arg("input"), py::arg("weight"), py::arg("bias") = py::none(),
-          py::arg("epilogue") = 0);
-    m.def("hipblaslt_bmm", &hipblaslt_bmm,
-          "hipBLASLt batched C[i] = A[i] @ B[i] (fp16/bf16/fp32); None if unsupported");
-    m.def("has_hipblaslt", []() { return true; },
-          "Whether the hipBLASLt GEMM tier was compiled in");
-#else
-    m.def("has_hipblaslt", []() { return false; },
-          "Whether the hipBLASLt GEMM tier was compiled in");
-#endif
+    // CK (has_ck/ck_conv/ck_group_norm/ck_gemm_linear) and hipBLASLt
+    // (has_hipblaslt/hipblaslt_linear/hipblaslt_bmm) used to be bound here
+    // too -- they now live in their own PYBIND11_MODULEs, see
+    // src/ck_native.cpp and src/hipblaslt_native.cpp.
     m.def("conv3d_fp16_winograd_bt8_bc8", &conv3d_fp16_winograd_bt8_bc8_forward,
           "Testing/opt-in-only: direct call to the codegen'd Winograd fp16 conv3d "
           "kernel (groups=1). Returns None (not a Tensor) if the shape is outside "
@@ -851,6 +864,12 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
           "this index (see tools/kernelgen/variants.py's conv2d_fp16 entry order). "
           "Purely introspective (hipFuncGetAttributes / "
           "hipOccupancyMaxActiveBlocksPerMultiprocessor) -- doesn't launch anything.");
+    m.def("conv2d_fp16_run_variant", &conv2d_fp16_run_variant,
+          "Debug/bisection tool: run ONE specific conv2d_fp16 tile-shape variant "
+          "(see tools/kernelgen/variants.py's conv2d_fp16 entry order) directly, "
+          "bypassing run_conv2d_fp16's benchmark-and-cache dispatch. Compare against "
+          "F.conv2d per variant_idx to bisect a numerical mismatch to a specific "
+          "variant vs. code shared by all of them.");
     m.def("conv2d_fp16_cached_variant", &conv2d_fp16_cached_variant,
           "Testing/tooling-only: the variant_idx run_conv2d_fp16's live dispatch "
           "cached for this exact shape, or None if that shape hasn't been run "

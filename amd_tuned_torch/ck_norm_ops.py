@@ -35,7 +35,7 @@ from typing import Optional
 
 import torch
 
-from . import _native as _C
+from . import _native_ck as _C
 
 _DTYPES = (torch.float16, torch.bfloat16, torch.float32)
 

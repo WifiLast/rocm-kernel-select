@@ -50,7 +50,7 @@ from typing import Optional
 
 import torch
 
-from . import _native as _C
+from . import _native_ck as _C
 # The epilogue vocabulary is shared with the hipBLASLt tier; it is defined
 # there because that tier is the one whose C++ header owns the enum.
 from .hipblaslt_ops import (  # noqa: F401  (re-exported for callers)
@@ -65,14 +65,19 @@ _DTYPES = (torch.float16, torch.bfloat16)
 
 
 def available() -> bool:
-    """True if the extension was built with Composable Kernel present.
+    """True if the extension was built with the CK GEMM tier present.
 
     False is normal, not an error: the tier is optional at build time (see
-    setup.py's AMD_TUNED_TORCH_CK_ROOT detection), so callers must treat
+    setup.py's AMD_TUNED_TORCH_CK_GEMM detection), so callers must treat
     this as a capability check exactly like ck_ops.available().
+
+    As in ck_ops.available(), has_ck() only says some CK tier was built --
+    this tier is the most expensive half of the CK build cost and is the
+    one most often switched off, so its own entry point is what gets
+    checked.
     """
     try:
-        return bool(_C.has_ck())
+        return bool(_C.has_ck()) and hasattr(_C, "ck_gemm_linear")
     except AttributeError:
         return False
 

@@ -48,7 +48,7 @@ from typing import Optional
 
 import torch
 
-from . import _native as _C
+from . import _native_hipblaslt as _C
 
 # Mirrors AmdTunedTorchEpilogue in src/hipblaslt_gemm.hpp. Kept as plain
 # ints so this module never has to import a ROCm header's enum.

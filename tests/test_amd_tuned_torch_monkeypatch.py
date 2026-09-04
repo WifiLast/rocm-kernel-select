@@ -702,6 +702,429 @@ class TestConv3dWinogradFp16Dispatch:
                 amd_tuned_torch.disable()
 
 
+class TestIsFlashAttnRocwmmaEligible:
+    def _qk(self, B=1, H=4, Nq=8, Nk=8, D=32, dtype=torch.float16):
+        q = torch.randn(B, H, Nq, D, dtype=dtype)
+        k = torch.randn(B, H, Nk, D, dtype=dtype)
+        return q, k
+
+    def test_eligible_shape_passes(self, monkeypatch):
+        force_eligible(monkeypatch)
+        q, k = self._qk()
+        assert amd_tuned_torch._is_flash_attn_rocwmma_eligible(q, k, None, 0.0, False)
+
+    def test_attn_mask_given_ineligible(self, monkeypatch):
+        force_eligible(monkeypatch)
+        q, k = self._qk()
+        mask = torch.ones(1, 1, 8, 8, dtype=torch.bool)
+        assert not amd_tuned_torch._is_flash_attn_rocwmma_eligible(q, k, mask, 0.0, False)
+
+    def test_dropout_ineligible(self, monkeypatch):
+        force_eligible(monkeypatch)
+        q, k = self._qk()
+        assert not amd_tuned_torch._is_flash_attn_rocwmma_eligible(q, k, None, 0.1, False)
+
+    def test_non_4d_ineligible(self, monkeypatch):
+        force_eligible(monkeypatch)
+        q = torch.randn(4, 8, 32)
+        k = torch.randn(4, 8, 32)
+        assert not amd_tuned_torch._is_flash_attn_rocwmma_eligible(q, k, None, 0.0, False)
+
+    def test_causal_with_mismatched_seqlen_ineligible(self, monkeypatch):
+        """The vendored kernel's causal masking is plain top-left (no
+        q_len/kv_len offset parameter anywhere in its host.cpp signature)
+        -- only identical to bottom-right causal when q_len == kv_len, so
+        is_causal must decline otherwise rather than compute the wrong
+        mask silently."""
+        force_eligible(monkeypatch)
+        q, k = self._qk(Nq=4, Nk=8)
+        assert not amd_tuned_torch._is_flash_attn_rocwmma_eligible(q, k, None, 0.0, True)
+
+    def test_causal_with_matched_seqlen_eligible(self, monkeypatch):
+        force_eligible(monkeypatch)
+        q, k = self._qk(Nq=8, Nk=8)
+        assert amd_tuned_torch._is_flash_attn_rocwmma_eligible(q, k, None, 0.0, True)
+
+    def test_non_causal_with_mismatched_seqlen_still_eligible(self, monkeypatch):
+        # non-causal doesn't care about seqlen matching at all -- only
+        # is_causal triggers the top-left-vs-bottom-right ambiguity.
+        force_eligible(monkeypatch)
+        q, k = self._qk(Nq=4, Nk=8)
+        assert amd_tuned_torch._is_flash_attn_rocwmma_eligible(q, k, None, 0.0, False)
+
+
+class TestFlashAttnRocwmmaDispatch:
+    """enable_flash_attn_rocwmma -- off by default, composes with
+    enable()/disable() regardless of call order (see its docstring, and
+    TestConv3dWinogradFp16Dispatch's identical LIFO-ordering lesson --
+    same _ORIGINALS-bookkeeping hazard applies here)."""
+
+    def teardown_method(self):
+        amd_tuned_torch.disable_flash_attn_rocwmma()
+
+    def test_disabled_by_default(self):
+        assert not amd_tuned_torch._FLASH_ATTN_ROCWMMA_ENABLED
+
+    def test_noop_with_warning_when_unavailable(self, monkeypatch):
+        monkeypatch.setattr(amd_tuned_torch.flash_attn_rocwmma_ops, "available", lambda: False)
+        monkeypatch.setattr(
+            amd_tuned_torch.flash_attn_rocwmma_ops, "load_error",
+            lambda: RuntimeError("no rocwmma headers"),
+        )
+        prior = F.scaled_dot_product_attention
+        with pytest.warns(UserWarning):
+            amd_tuned_torch.enable_flash_attn_rocwmma()
+        assert F.scaled_dot_product_attention is prior
+        assert not amd_tuned_torch._FLASH_ATTN_ROCWMMA_ENABLED
+
+    def test_falls_back_when_ineligible_shape(self, monkeypatch):
+        force_eligible(monkeypatch)
+        monkeypatch.setattr(amd_tuned_torch.flash_attn_rocwmma_ops, "available", lambda: True)
+        mocked_sdpa = MagicMock(return_value=torch.zeros(1, 4, 8, 32))
+        monkeypatch.setattr(
+            amd_tuned_torch.flash_attn_rocwmma_ops, "scaled_dot_product_attention", mocked_sdpa
+        )
+        amd_tuned_torch.enable_flash_attn_rocwmma()
+        q = torch.randn(1, 4, 8, 32)
+        k = torch.randn(1, 4, 8, 32)
+        v = torch.randn(1, 4, 8, 32)
+        mask = torch.ones(1, 1, 8, 8, dtype=torch.bool)  # explicit mask -> always ineligible
+        F.scaled_dot_product_attention(q, k, v, attn_mask=mask)
+        mocked_sdpa.assert_not_called()
+
+    def test_calls_flash_attn_when_eligible(self, monkeypatch):
+        force_eligible(monkeypatch)
+        monkeypatch.setattr(amd_tuned_torch.flash_attn_rocwmma_ops, "available", lambda: True)
+        expected = torch.zeros(1, 4, 8, 32)
+        mocked_sdpa = MagicMock(return_value=expected)
+        monkeypatch.setattr(
+            amd_tuned_torch.flash_attn_rocwmma_ops, "scaled_dot_product_attention", mocked_sdpa
+        )
+        amd_tuned_torch.enable_flash_attn_rocwmma()
+        q = torch.randn(1, 4, 8, 32)
+        k = torch.randn(1, 4, 8, 32)
+        v = torch.randn(1, 4, 8, 32)
+        out = F.scaled_dot_product_attention(q, k, v)
+        assert out is expected
+        mocked_sdpa.assert_called_once()
+
+    def test_falls_back_to_stock_on_runtime_error(self, monkeypatch):
+        force_eligible(monkeypatch)
+        monkeypatch.setattr(amd_tuned_torch.flash_attn_rocwmma_ops, "available", lambda: True)
+        q = torch.randn(1, 4, 8, 32)
+        k = torch.randn(1, 4, 8, 32)
+        v = torch.randn(1, 4, 8, 32)
+        expected = F.scaled_dot_product_attention(q, k, v)  # stock, captured before patching
+        monkeypatch.setattr(
+            amd_tuned_torch.flash_attn_rocwmma_ops, "scaled_dot_product_attention",
+            MagicMock(side_effect=RuntimeError("unsupported shape")),
+        )
+        amd_tuned_torch.enable_flash_attn_rocwmma()
+        out = F.scaled_dot_product_attention(q, k, v)
+        assert torch.equal(out, expected)
+
+    def test_disable_restores_prior_f_sdpa(self, monkeypatch):
+        monkeypatch.setattr(amd_tuned_torch.flash_attn_rocwmma_ops, "available", lambda: True)
+        prior = F.scaled_dot_product_attention
+        amd_tuned_torch.enable_flash_attn_rocwmma()
+        assert F.scaled_dot_product_attention is not prior
+        amd_tuned_torch.disable_flash_attn_rocwmma()
+        assert F.scaled_dot_product_attention is prior
+
+    def test_composes_on_top_of_main_patched_sdpa(self, monkeypatch, te):
+        """enable() first, then enable_flash_attn_rocwmma() -- a shape our
+        tier declines (causal with mismatched seqlen) must fall through
+        to _patched_sdpa (the TE tier), not straight to stock, per the
+        docstring's call-order-independence claim. Cleanup undoes these
+        LIFO, same lesson as TestConv3dWinogradFp16Dispatch."""
+        force_eligible(monkeypatch)
+        monkeypatch.setattr(amd_tuned_torch.flash_attn_rocwmma_ops, "available", lambda: True)
+        was_enabled = amd_tuned_torch.is_enabled()
+        if not was_enabled:
+            amd_tuned_torch.enable()
+        try:
+            amd_tuned_torch.enable_flash_attn_rocwmma()
+            try:
+                q = torch.randn(1, 4, 8, 32)
+                k = torch.randn(1, 4, 16, 32)  # mismatched seqlen -> our tier declines when causal
+                v = torch.randn(1, 4, 16, 32)
+                te.scaled_dot_product_attention.return_value = torch.zeros(1, 4, 8, 32)
+                out = F.scaled_dot_product_attention(q, k, v, is_causal=True)
+                assert out is te.scaled_dot_product_attention.return_value
+                te.scaled_dot_product_attention.assert_called_once()
+            finally:
+                amd_tuned_torch.disable_flash_attn_rocwmma()
+        finally:
+            if not was_enabled:
+                amd_tuned_torch.disable()
+
+
+class TestIsTritonKernelsRmsnormEligible:
+    def test_eligible_shape_passes(self, monkeypatch):
+        force_eligible(monkeypatch)
+        x = torch.randn(2, 4, 8)
+        w = torch.randn(8)
+        assert amd_tuned_torch._is_triton_kernels_rmsnorm_eligible(x, w)
+
+    def test_missing_weight_ineligible(self, monkeypatch):
+        force_eligible(monkeypatch)
+        x = torch.randn(2, 4, 8)
+        assert not amd_tuned_torch._is_triton_kernels_rmsnorm_eligible(x, None)
+
+    def test_mismatched_hidden_dim_ineligible(self, monkeypatch):
+        force_eligible(monkeypatch)
+        x = torch.randn(2, 4, 8)
+        w = torch.randn(16)
+        assert not amd_tuned_torch._is_triton_kernels_rmsnorm_eligible(x, w)
+
+    def test_autograd_live_ineligible(self):
+        # No force_eligible here -- _grad_safe must run for real against a
+        # requires_grad tensor (triton_kernels' rmsnorm has no backward pass).
+        x = torch.randn(2, 4, 8, requires_grad=True)
+        w = torch.randn(8)
+        assert not amd_tuned_torch._is_triton_kernels_rmsnorm_eligible(x, w)
+
+
+class TestTritonKernelsRmsnormDispatch:
+    """enable_triton_kernels_rmsnorm -- off by default, composes with
+    enable()/disable() regardless of call order, same LIFO-disable caveat
+    as TestFlashAttnRocwmmaDispatch/TestConv3dWinogradFp16Dispatch."""
+
+    def teardown_method(self):
+        amd_tuned_torch.disable_triton_kernels_rmsnorm()
+
+    def test_disabled_by_default(self):
+        assert not amd_tuned_torch._TRITON_KERNELS_RMSNORM_ENABLED
+
+    def test_noop_with_warning_when_unavailable(self, monkeypatch):
+        monkeypatch.setattr(amd_tuned_torch.triton_kernels_ops, "available", lambda: False)
+        prior = F.rms_norm
+        with pytest.warns(UserWarning):
+            amd_tuned_torch.enable_triton_kernels_rmsnorm()
+        assert F.rms_norm is prior
+        assert not amd_tuned_torch._TRITON_KERNELS_RMSNORM_ENABLED
+
+    def test_falls_back_when_ineligible(self, monkeypatch):
+        force_eligible(monkeypatch)
+        monkeypatch.setattr(amd_tuned_torch.triton_kernels_ops, "available", lambda: True)
+        mocked_rms_norm = MagicMock(return_value=torch.zeros(2, 4, 8))
+        monkeypatch.setattr(amd_tuned_torch.triton_kernels_ops, "rms_norm", mocked_rms_norm)
+        amd_tuned_torch.enable_triton_kernels_rmsnorm()
+        x = torch.randn(2, 4, 8)
+        F.rms_norm(x, [8], None)  # no weight -> always ineligible
+        mocked_rms_norm.assert_not_called()
+
+    def test_calls_triton_kernels_when_eligible(self, monkeypatch):
+        force_eligible(monkeypatch)
+        monkeypatch.setattr(amd_tuned_torch.triton_kernels_ops, "available", lambda: True)
+        expected = torch.zeros(2, 4, 8)
+        mocked_rms_norm = MagicMock(return_value=expected)
+        monkeypatch.setattr(amd_tuned_torch.triton_kernels_ops, "rms_norm", mocked_rms_norm)
+        amd_tuned_torch.enable_triton_kernels_rmsnorm()
+        x = torch.randn(2, 4, 8)
+        w = torch.randn(8)
+        out = F.rms_norm(x, [8], w)
+        assert out is expected
+        mocked_rms_norm.assert_called_once()
+
+    def test_falls_back_to_stock_on_runtime_error(self, monkeypatch):
+        force_eligible(monkeypatch)
+        monkeypatch.setattr(amd_tuned_torch.triton_kernels_ops, "available", lambda: True)
+        x = torch.randn(2, 4, 8)
+        w = torch.randn(8)
+        expected = F.rms_norm(x, [8], w)  # stock, captured before patching
+        monkeypatch.setattr(
+            amd_tuned_torch.triton_kernels_ops, "rms_norm",
+            MagicMock(side_effect=RuntimeError("unsupported shape")),
+        )
+        amd_tuned_torch.enable_triton_kernels_rmsnorm()
+        out = F.rms_norm(x, [8], w)
+        assert torch.equal(out, expected)
+
+    def test_disable_restores_prior_f_rms_norm(self, monkeypatch):
+        monkeypatch.setattr(amd_tuned_torch.triton_kernels_ops, "available", lambda: True)
+        prior = F.rms_norm
+        amd_tuned_torch.enable_triton_kernels_rmsnorm()
+        assert F.rms_norm is not prior
+        amd_tuned_torch.disable_triton_kernels_rmsnorm()
+        assert F.rms_norm is prior
+
+    def test_composes_on_top_of_main_patched_rms_norm(self, monkeypatch, te):
+        """enable() first, then enable_triton_kernels_rmsnorm() -- a call
+        our tier declines (autograd live -- triton_kernels' rmsnorm has no
+        backward pass) but TE's real torch.autograd.Function-backed
+        rms_norm does not decline for that reason, so it must fall through
+        to _patched_rms_norm (the TE tier), not straight to stock. Cleanup
+        undoes these LIFO, same lesson as TestConv3dWinogradFp16Dispatch."""
+        monkeypatch.setattr(amd_tuned_torch, "_usable", lambda *a, **k: True)
+        monkeypatch.setattr(amd_tuned_torch.triton_kernels_ops, "available", lambda: True)
+        was_enabled = amd_tuned_torch.is_enabled()
+        if not was_enabled:
+            amd_tuned_torch.enable()
+        try:
+            amd_tuned_torch.enable_triton_kernels_rmsnorm()
+            try:
+                x = torch.randn(2, 4, 8, requires_grad=True)
+                w = torch.randn(8)
+                te.rms_norm.return_value = torch.zeros(2, 4, 8)
+                out = F.rms_norm(x, [8], w)  # autograd live -> our tier declines
+                assert out is te.rms_norm.return_value
+                te.rms_norm.assert_called_once()
+            finally:
+                amd_tuned_torch.disable_triton_kernels_rmsnorm()
+        finally:
+            if not was_enabled:
+                amd_tuned_torch.disable()
+
+
+class TestFlashAttnRocwmmaKernelSelectContest:
+    """_patched_sdpa_flash_attn_rocwmma routes eligible calls through the
+    same kernel_select contest linear/bmm/conv2d/conv3d/group_norm already
+    use, instead of always preferring the vendored kernel unconditionally
+    whenever eligible. tests/conftest.py forces
+    AMD_TUNED_TORCH_MEASURE_KERNELS=0 for the rest of this suite (see
+    test_kernel_select.py's own module docstring for why: the contest
+    would call every candidate several times and break call-count
+    assertions elsewhere) -- this class opts back in explicitly, the same
+    way test_kernel_select.py's `_clean` fixture does, and stubs
+    kernel_select._time the same way test_kernel_select.py's `timings`
+    fixture does (real timing needs a GPU and asserts a benchmark, not a
+    behaviour). Correctness verification (see kernel_select's own
+    CORRECTNESS VERIFICATION docstring section) is disabled here too, same
+    reason and same pattern as test_kernel_select.py's `_clean` fixture:
+    `flash_out` below is a bare torch.zeros(...) sentinel, not a real
+    attention output, so it would never numerically match the real stock
+    fallback -- these tests are about SELECTION policy (does the faster
+    candidate win, is the decision cached), not about verification, which
+    test_kernel_select.py::TestCorrectnessVerification covers directly."""
+
+    def setup_method(self):
+        amd_tuned_torch.kernel_select._ENABLED = True
+        amd_tuned_torch.kernel_select._VERIFY_ENABLED = False
+        amd_tuned_torch.kernel_select.reset()
+
+    def teardown_method(self):
+        amd_tuned_torch.disable_flash_attn_rocwmma()
+        amd_tuned_torch.kernel_select.reset()
+        amd_tuned_torch.kernel_select._VERIFY_ENABLED = True
+        amd_tuned_torch.kernel_select._ENABLED = False
+
+    def _qkv(self, dtype=torch.float16):
+        q = torch.randn(1, 4, 8, 32, dtype=dtype)
+        k = torch.randn(1, 4, 8, 32, dtype=dtype)
+        v = torch.randn(1, 4, 8, 32, dtype=dtype)
+        return q, k, v
+
+    def test_flash_wins_when_measured_faster(self, monkeypatch):
+        force_eligible(monkeypatch)
+        monkeypatch.setattr(amd_tuned_torch.flash_attn_rocwmma_ops, "available", lambda: True)
+        flash_out = torch.zeros(1, 4, 8, 32)
+        mocked_flash = MagicMock(return_value=flash_out)
+        monkeypatch.setattr(amd_tuned_torch.flash_attn_rocwmma_ops,
+                             "scaled_dot_product_attention", mocked_flash)
+
+        def fake_time(fn):
+            out = fn()
+            return None if out is None else (1.0 if out is flash_out else 2.0)
+
+        monkeypatch.setattr(amd_tuned_torch.kernel_select, "_time", fake_time)
+
+        amd_tuned_torch.enable_flash_attn_rocwmma()
+        q, k, v = self._qkv()
+        out = F.scaled_dot_product_attention(q, k, v)
+        assert out is flash_out
+        mocked_flash.assert_called()
+        assert amd_tuned_torch.kernel_select.debug_winners()
+
+    def test_fallback_wins_when_measured_faster(self, monkeypatch):
+        force_eligible(monkeypatch)
+        monkeypatch.setattr(amd_tuned_torch.flash_attn_rocwmma_ops, "available", lambda: True)
+        q, k, v = self._qkv()
+        expected = F.scaled_dot_product_attention(q, k, v)  # stock, captured before patching
+
+        flash_out = torch.zeros(1, 4, 8, 32)
+        mocked_flash = MagicMock(return_value=flash_out)
+        monkeypatch.setattr(amd_tuned_torch.flash_attn_rocwmma_ops,
+                             "scaled_dot_product_attention", mocked_flash)
+
+        def fake_time(fn):
+            out = fn()
+            return None if out is None else (2.0 if out is flash_out else 1.0)
+
+        monkeypatch.setattr(amd_tuned_torch.kernel_select, "_time", fake_time)
+
+        amd_tuned_torch.enable_flash_attn_rocwmma()
+        out = F.scaled_dot_product_attention(q, k, v)
+        assert torch.equal(out, expected)
+        # The losing candidate is still measured once (that's how a contest
+        # decides), but its output must never be the one returned.
+        mocked_flash.assert_called()
+        assert out is not flash_out
+
+    def test_decision_is_cached_and_not_re_timed(self, monkeypatch):
+        force_eligible(monkeypatch)
+        monkeypatch.setattr(amd_tuned_torch.flash_attn_rocwmma_ops, "available", lambda: True)
+        flash_out = torch.zeros(1, 4, 8, 32)
+        mocked_flash = MagicMock(return_value=flash_out)
+        monkeypatch.setattr(amd_tuned_torch.flash_attn_rocwmma_ops,
+                             "scaled_dot_product_attention", mocked_flash)
+
+        time_calls = []
+
+        def fake_time(fn):
+            out = fn()
+            time_calls.append(1)
+            return None if out is None else (1.0 if out is flash_out else 2.0)
+
+        monkeypatch.setattr(amd_tuned_torch.kernel_select, "_time", fake_time)
+
+        amd_tuned_torch.enable_flash_attn_rocwmma()
+        q, k, v = self._qkv()
+        F.scaled_dot_product_attention(q, k, v)
+        assert len(time_calls) > 0
+        first_round = len(time_calls)
+
+        out2 = F.scaled_dot_product_attention(q, k, v)
+        assert out2 is flash_out
+        assert len(time_calls) == first_round  # no re-measurement on the cached path
+
+    def test_ineligible_call_skips_the_contest_entirely(self, monkeypatch):
+        force_eligible(monkeypatch)
+        monkeypatch.setattr(amd_tuned_torch.flash_attn_rocwmma_ops, "available", lambda: True)
+        mocked_flash = MagicMock(return_value=torch.zeros(1, 4, 8, 32))
+        monkeypatch.setattr(amd_tuned_torch.flash_attn_rocwmma_ops,
+                             "scaled_dot_product_attention", mocked_flash)
+        monkeypatch.setattr(amd_tuned_torch.kernel_select, "_time",
+                             lambda fn: pytest.fail("contest must not run for an ineligible call"))
+
+        amd_tuned_torch.enable_flash_attn_rocwmma()
+        q = torch.randn(1, 4, 8, 32)
+        k = torch.randn(1, 4, 8, 32)
+        v = torch.randn(1, 4, 8, 32)
+        mask = torch.ones(1, 1, 8, 8, dtype=torch.bool)  # explicit mask -> always ineligible
+        F.scaled_dot_product_attention(q, k, v, attn_mask=mask)
+        mocked_flash.assert_not_called()
+
+    def test_kernel_select_disabled_restores_old_unconditional_preference(self, monkeypatch):
+        # AMD_TUNED_TORCH_MEASURE_KERNELS=0 (or kernel_select._ENABLED
+        # False, as here) must fall back to the pre-contest behaviour:
+        # always prefer flash_rocwmma when eligible, no timing at all.
+        amd_tuned_torch.kernel_select._ENABLED = False
+        force_eligible(monkeypatch)
+        monkeypatch.setattr(amd_tuned_torch.flash_attn_rocwmma_ops, "available", lambda: True)
+        flash_out = torch.zeros(1, 4, 8, 32)
+        mocked_flash = MagicMock(return_value=flash_out)
+        monkeypatch.setattr(amd_tuned_torch.flash_attn_rocwmma_ops,
+                             "scaled_dot_product_attention", mocked_flash)
+        monkeypatch.setattr(amd_tuned_torch.kernel_select, "_time",
+                             lambda fn: pytest.fail("contest must not run when kernel_select is disabled"))
+
+        amd_tuned_torch.enable_flash_attn_rocwmma()
+        q, k, v = self._qkv()
+        out = F.scaled_dot_product_attention(q, k, v)
+        assert out is flash_out
+
+
 # ---------------------------------------------------------------------------
 # TransformerEngine-backed ops: layer_norm, rms_norm, gelu, silu, sdpa
 # ---------------------------------------------------------------------------

@@ -182,6 +182,20 @@ recompilation cost are workload-specific judgment calls. See
 amd_tuned_torch/torch_compile.py's module docstring for the aggressive defaults
 (max-autotune, Inductor freezing, static shapes) and ROCm-specific caveats.
 
+amd_tuned_torch.rocm_env_check is advisory only -- unlike everything else
+listed here, it never touches torch/ROCm behavior at all, just reads
+os.environ (and this package's own tier-availability state) at import time
+and warns about ROCm/HIP/MIOpen/rocBLAS/PyTorch environment variables that
+individually often look harmless (usually left over from debugging a
+different problem) but compound into a real performance regression once
+combined with each other or with how this package actually dispatches --
+e.g. HIP_LAUNCH_BLOCKING=1 serializing the exact hot-path ops enable()
+patches, or AMD_TUNED_TORCH_MEASURE_KERNELS=0 silently benching a compiled
+CK/hipBLASLt tier out of the linear/bmm contest. Set
+AMD_TUNED_TORCH_ROCM_ENV_CHECK=0 to skip it; see
+amd_tuned_torch/rocm_env_check.py's module docstring for the full rule list
+and what each one is based on.
+
 Import this package to enable the patch:
 
     import amd_tuned_torch   # patches torch/torch.nn.functional on import
@@ -244,16 +258,45 @@ import torch.nn.functional as F
 # simply sits beside this file.
 from . import _native_loader
 
-_C = _native_loader.load(__name__, os.path.dirname(os.path.abspath(__file__)))
+_package_dir = os.path.dirname(os.path.abspath(__file__))
+
+_C = _native_loader.load(__name__, _package_dir)
 _native = _C  # so `from . import _native` elsewhere in the package resolves
+
+# CK and hipBLASLt each got split into their own extension (see setup.py and
+# src/ck_native.cpp / src/hipblaslt_native.cpp) so that rebuilding one never
+# relinks the core _native extension or each other. Both are optional tiers
+# (required=False): a build predating this split, or one that never enabled
+# either, degrades to "tier unavailable" here -- amd_tuned_torch/ck_ops.py,
+# ck_gemm_ops.py, ck_norm_ops.py and hipblaslt_ops.py all already handle
+# their own `_C` being None the same way they handle has_ck()/
+# has_hipblaslt() reporting False (AttributeError -> unavailable), so no
+# further guard is needed here.
+_C_CK = _native_loader.load(__name__, _package_dir, module_name="_native_ck", required=False)
+_native_ck = _C_CK  # so `from . import _native_ck` in ck_ops.py etc. resolves
+
+_C_HIPBLASLT = _native_loader.load(__name__, _package_dir, module_name="_native_hipblaslt",
+                                    required=False)
+_native_hipblaslt = _C_HIPBLASLT  # so `from . import _native_hipblaslt` in hipblaslt_ops.py resolves
 
 
 def native_build_info() -> str:
-    """Which _native.so is loaded and why it was chosen."""
-    return _native_loader.describe()
+    """Which _native*.so extensions are loaded and why each was chosen."""
+    return "\n".join(
+        _native_loader.describe(name) for name in ("_native", "_native_ck", "_native_hipblaslt")
+    )
 
+from . import rocm_env_check
 from . import te_ops
 from . import aiter_ops
+from . import flash_attn_rocwmma_ops
+from . import triton_kernels_ops
+from . import mla_ops
+from . import fused_norm_ops
+from . import rope_ops
+from . import fused_ce_ops
+from . import swiglu_ops
+from . import splitk_gemm_ops
 from . import ck_ops
 from . import ck_gemm_ops
 from . import ck_norm_ops
@@ -266,6 +309,7 @@ from . import cache
 from . import hub_ops
 from . import torch_compile
 from . import miopen_fallback
+
 
 # Raw, unpatched access to the native HIP group_norm kernel for manual use
 # regardless of what enable() patches. (linear/matmul/bmm live in
@@ -376,6 +420,16 @@ def _patched_linear(input, weight, bias=None):
     behind. Two rows are outright regressions, which is exactly why this
     goes through kernel_select rather than a fixed tier order: stock is an
     ordinary candidate and wins the shapes it deserves to win.
+
+    A fourth candidate, splitk_gemm_ops (see that module's docstring),
+    targets exactly the row both existing tiers regress on: single-token/
+    small-batch decode, where a plain tiled GEMM has too few output tiles
+    to occupy this card's CUs regardless of per-tile throughput. It splits
+    the K-reduction across more thread blocks instead, and -- like every
+    candidate here -- only ever wins if kernel_select's own numerical
+    verification against stock actually agrees; unmeasured on real
+    hardware, so it may simply always lose its own contest here, which is
+    the safe failure mode this whole module exists to guarantee.
     """
     orig = _ORIGINALS[(F, "linear")]
     if not (_grad_safe(input, weight, bias) and _usable(input, weight)):
@@ -403,6 +457,12 @@ def _patched_linear(input, weight, bias=None):
                     input, weight, bias,
                     ck_gemm_ops.EPILOGUE_BIAS if bias is not None
                     else ck_gemm_ops.EPILOGUE_NONE)),
+                # Decode-shaped (small-M) candidate only -- see
+                # splitk_gemm_ops.py's module docstring for why hipBLASLt/
+                # CK both regress at M=1 and what this does about it.
+                # Declines (returns None) for any M outside its target
+                # range, same as every other candidate here.
+                ("splitk", lambda: splitk_gemm_ops.linear(input, weight, bias)),
                 ("aiter", lambda: _linear_aiter(input, weight, bias)),
                 ("stock", lambda: orig(input, weight, bias)),
             ])
@@ -418,6 +478,10 @@ def _patched_linear(input, weight, bias=None):
             out = ck_gemm_ops.linear(input, weight, bias,
                                      ck_gemm_ops.EPILOGUE_BIAS if bias is not None
                                      else ck_gemm_ops.EPILOGUE_NONE)
+            if out is not None:
+                return out
+        elif won == "splitk":
+            out = splitk_gemm_ops.linear(input, weight, bias)
             if out is not None:
                 return out
 
@@ -439,32 +503,66 @@ def _linear_aiter(input, weight, bias):
 
 
 def _patched_matmul(input, other, *, out=None):
+    """torch.matmul over the SAME hipBLASLt/aiter/stock contest _patched_bmm
+    already uses, for the batched cases matmul reduces to a bmm problem: 2D
+    @ 2D, 3D @ 3D, and >=4D @ >=4D where both operands share the exact same
+    batch shape (no broadcasting -- neither hipBLASLt's nor aiter's batched
+    kernels have broadcast semantics of their own). Every candidate,
+    including stock, operates on the reshaped-to-3D view; the result is
+    reshaped back to matmul's own shape convention once, after the contest
+    has already picked a winner, so the contest itself only ever has to
+    reason about one shape family (matching _patched_bmm's own key).
+
+    This used to call aiter directly with no fallback to hipBLASLt/CK at
+    all -- the same gap _patched_linear/_patched_bmm closed once hipBLASLt
+    and CK GEMM existed as real candidates, just never closed here too."""
     orig = _ORIGINALS[(torch, "matmul")]
     if out is not None or not (_grad_safe(input, other) and _usable(input, other)):
         return orig(input, other) if out is None else orig(input, other, out=out)
-    if input.dtype == other.dtype:
-        try:
-            if input.dim() == 2 and other.dim() == 2:
-                return compile_ops.bmm_fp16(input.unsqueeze(0), other.unsqueeze(0)).squeeze(0)
-            if input.dim() == 3 and other.dim() == 3:
-                return compile_ops.bmm_fp16(input, other)
-            # Attention's Q@K^T / attn@V matmuls are (batch, heads, seq,
-            # head_dim) -- 4D, not 3D -- so they fell through to stock above
-            # until now. aiter's batched_gemm_bf16 has no broadcasting
-            # semantics of its own, so only take this path when both
-            # operands share the exact same batch shape (no broadcast
-            # needed): flatten every leading dim but the last two into one,
-            # call aiter, then reshape back.
-            if input.dim() == other.dim() >= 4 and input.shape[:-2] == other.shape[:-2]:
-                batch_shape = input.shape[:-2]
-                flat_out = compile_ops.bmm_fp16(
-                    input.reshape(-1, *input.shape[-2:]),
-                    other.reshape(-1, *other.shape[-2:]),
-                )
-                return flat_out.view(*batch_shape, *flat_out.shape[-2:])
-        except (RuntimeError, TypeError, AssertionError):
-            pass
-    return orig(input, other)
+    if input.dtype != other.dtype:
+        return orig(input, other)
+
+    if input.dim() == 2 and other.dim() == 2:
+        a3, b3 = input.unsqueeze(0), other.unsqueeze(0)
+        def _reshape_back(o3): return o3.squeeze(0)
+    elif input.dim() == 3 and other.dim() == 3:
+        a3, b3 = input, other
+        def _reshape_back(o3): return o3
+    elif input.dim() == other.dim() >= 4 and input.shape[:-2] == other.shape[:-2]:
+        batch_shape = input.shape[:-2]
+        a3 = input.reshape(-1, *input.shape[-2:])
+        b3 = other.reshape(-1, *other.shape[-2:])
+        def _reshape_back(o3): return o3.view(*batch_shape, *o3.shape[-2:])
+    else:
+        return orig(input, other)
+
+    # matmul on the reshaped 3D tensors is bmm's own semantics exactly (no
+    # broadcasting possible once both operands are forced to the same
+    # leading batch dim), so `orig` applied here is a safe, cheap stock
+    # reference -- no need to reach for a separate "true" matmul call on
+    # the un-reshaped tensors.
+    def _stock3(): return orig(a3, b3)
+
+    if kernel_select.enabled():
+        key = (input.dtype, tuple(a3.shape), tuple(b3.shape))
+        won = kernel_select.cached_key("matmul", key)
+        if won == "stock":
+            return _reshape_back(_stock3())
+        if won == "hipblaslt":
+            got = hipblaslt_ops.bmm(a3, b3)
+            if got is not None:
+                return _reshape_back(got)
+        elif won is None:
+            got = kernel_select.pick_key("matmul", key, [
+                ("hipblaslt", lambda: hipblaslt_ops.bmm(a3, b3)),
+                ("aiter", lambda: _bmm_aiter(a3, b3)),
+                ("stock", _stock3),
+            ])
+            if got is not None:
+                return _reshape_back(got)
+
+    got = _bmm_aiter(a3, b3)
+    return _reshape_back(got) if got is not None else orig(input, other)
 
 
 def _patched_bmm(input, mat2, *, out=None):
@@ -1204,6 +1302,393 @@ def disable_conv3d_winograd_fp16() -> None:
     _CONV3D_WINOGRAD_FP16_ENABLED = False
 
 
+# ---------------------------------------------------------------------------
+# FlashAttention (rocWMMA) -- DEFAULT ON as of the bottom-of-file
+# AMD_TUNED_TORCH_FLASH_ATTN_ROCWMMA trigger (set it to "0" to opt back
+# out), even though flash_attn_rocwmma_ops wraps a vendored kernel
+# (amd_tuned_torch/_vendor/rocwmma_fattn/) that has never been run,
+# correctness-checked, or benchmarked on any hardware this project has
+# access to -- see that module's docstring, and enable_flash_attn_rocwmma's
+# docstring below for exactly what remains unverified. This was a
+# deliberate choice to accept that risk by default, not an oversight --
+# the eligibility gate (_is_flash_attn_rocwmma_eligible) and the
+# try/except fallback to whatever F.scaled_dot_product_attention already
+# was mean a bad/incompatible build degrades to a warning at worst (see
+# enable_flash_attn_rocwmma's `if not flash_attn_rocwmma_ops.available()`
+# branch), not a hard failure, which is what makes default-on tolerable
+# here in a way it wouldn't be for a kernel with no such fallback.
+# Composes with enable()/disable() regardless of call order the same way
+# enable_conv3d_winograd_fp16 does (captures whatever
+# F.scaled_dot_product_attention currently is as its own fallback) -- the
+# SAME disable-ordering caveat applies here too (disable this before the
+# main disable(), not after); see enable_conv3d_winograd_fp16's docstring
+# for the mechanism/why.
+# ---------------------------------------------------------------------------
+
+_FLASH_ATTN_ROCWMMA_ENABLED = False
+_flash_attn_rocwmma_fallback: Callable | None = None
+
+_FLASH_ATTN_ROCWMMA_DTYPES = (torch.float16, torch.bfloat16)
+
+
+def _is_flash_attn_rocwmma_eligible(query, key, attn_mask, dropout_p, is_causal) -> bool:
+    """True only for shapes flash_attn_rocwmma_ops's vendored kernel
+    actually supports: no attn_mask at all (its host.cpp forward/backward
+    signatures take only a `causal: bool` -- there is no mask tensor
+    input, unlike TE's fused path, which at least recognizes named
+    attn_mask_type strings), no dropout, 4D (batch, heads, seq, head_dim)
+    query/key/value, and -- if is_causal -- query and key the same
+    sequence length.
+
+    That last constraint is required, not a simplification: reading the
+    vendored kernel (kernel_fp16.cu's causal masking, a compile-time
+    template bool compared against plain block-relative positions, with
+    no q_len/kv_len offset parameter anywhere in host.cpp's
+    fwd_parm/bwd_parm) shows this is plain top-left causal masking, not
+    the KV-cache-offset-aware bottom-right causal masking
+    te_ops.is_bottom_right_causal_mask exists to detect. Top-left and
+    bottom-right causal are only identical when query_len == key_len, so
+    is_causal is only honored in that case -- anything else (e.g.
+    KV-cache decoding, q_len < kv_len) falls back rather than silently
+    computing the wrong mask."""
+    if attn_mask is not None or dropout_p != 0.0 or query.dim() != 4:
+        return False
+    if not _usable(query, key, dtypes=_FLASH_ATTN_ROCWMMA_DTYPES):
+        return False
+    if is_causal and query.shape[2] != key.shape[2]:
+        return False
+    return True
+
+
+def _patched_sdpa_flash_attn_rocwmma(query, key, value, attn_mask=None, dropout_p=0.0,
+                                      is_causal=False, scale=None, **kwargs):
+    """Eligible calls go through the SAME kernel_select contest linear/bmm/
+    conv2d/conv3d/group_norm already use, instead of always preferring the
+    vendored kernel unconditionally -- there was never a benchmark backing
+    that preference (see enable_flash_attn_rocwmma's docstring: "no reason
+    to assume this beats TE just because it's a dedicated kernel"), and the
+    only measurement this project HAS made for a different op (conv2d fp16)
+    found its own hand-written kernel losing to stock outright. 'fallback'
+    is whatever F.scaled_dot_product_attention was before this wrapper
+    installed itself -- TE-patched if the main enable() already ran, stock
+    otherwise -- and always succeeds, so it's the last-resort candidate the
+    same way stock is for every other contest in this file."""
+    def _fallback():
+        return _flash_attn_rocwmma_fallback(query, key, value, attn_mask=attn_mask,
+                                             dropout_p=dropout_p, is_causal=is_causal,
+                                             scale=scale, **kwargs)
+
+    if not _is_flash_attn_rocwmma_eligible(query, key, attn_mask, dropout_p, is_causal):
+        return _fallback()
+
+    def _try_flash_rocwmma():
+        try:
+            return flash_attn_rocwmma_ops.scaled_dot_product_attention(
+                query, key, value, attn_mask=attn_mask, scale=scale, is_causal=is_causal
+            )
+        except (RuntimeError, TypeError):
+            return None
+
+    if not kernel_select.enabled():
+        # AMD_TUNED_TORCH_MEASURE_KERNELS=0: restore the old fixed
+        # always-prefer-flash-when-eligible ordering, same escape hatch
+        # every other contest in this file offers.
+        out = _try_flash_rocwmma()
+        return _fallback() if out is None else out
+
+    # No stride/padding/dilation here (this isn't a conv) -- built directly
+    # rather than through kernel_select.pick, the same way _patched_linear/
+    # _patched_bmm/_patched_group_norm build their own keys. is_causal is
+    # part of the key because it changes which candidate is even eligible
+    # (_is_flash_attn_rocwmma_eligible's query_len==key_len requirement),
+    # not just how fast the winner is; attn_mask's actual content isn't --
+    # flash_rocwmma never accepts one at all (already excluded above), and
+    # the fallback candidate handles any mask shape identically regardless
+    # of contest outcome.
+    contest_key = (query.dtype, tuple(query.shape), tuple(key.shape), tuple(value.shape),
+                   bool(is_causal))
+    won = kernel_select.cached_key("sdpa", contest_key)
+    if won == "fallback":
+        return _fallback()
+    if won is None:
+        out = kernel_select.pick_key("sdpa", contest_key, [
+            ("flash_rocwmma", _try_flash_rocwmma),
+            ("fallback", _fallback),
+        ])
+        if out is not None:
+            return out
+    elif won == "flash_rocwmma":
+        out = _try_flash_rocwmma()
+        if out is not None:
+            return out
+    return _fallback()
+
+
+def enable_flash_attn_rocwmma() -> None:
+    """Called automatically at import time (see the
+    AMD_TUNED_TORCH_FLASH_ATTN_ROCWMMA trigger at the bottom of this
+    file; set it to "0" to opt out). Tries flash_attn_rocwmma_ops's
+    vendored rocWMMA FlashAttention-2 kernel first for eligible calls
+    (see _is_flash_attn_rocwmma_eligible: no attn_mask, no dropout, 4D
+    query/key/value, causal only when query_len == key_len), falling back
+    to whatever F.scaled_dot_product_attention currently is -- stock, or
+    TE-patched if the main enable() already ran -- for anything else, if
+    the kernel isn't available, or if it raises.
+
+    Being default-on does NOT mean this has been validated -- it still
+    has not, on any hardware this project has access to. Before trusting
+    output from this path on your actual RX 7900 XTX:
+      1. Confirm the JIT build actually succeeded:
+         `amd_tuned_torch.flash_attn_rocwmma_ops.available()`. If it
+         didn't, this function already no-ops with a warning (see the
+         `if not flash_attn_rocwmma_ops.available()` branch below) and
+         F.scaled_dot_product_attention is untouched -- this kernel's own
+         upstream project (see
+         amd_tuned_torch/_vendor/rocwmma_fattn/NOTICE.md) was only ever
+         benchmarked on Windows+ZLUDA, so a clean build here is not a
+         given.
+      2. Compare its output against F.scaled_dot_product_attention
+         numerically (fp16 and bf16, causal and non-causal, query_len ==
+         key_len) -- nothing in this package has verified correctness,
+         and there's no tests_hardware/ coverage for attention yet (see
+         tests_hardware/test_conv_kernels.py for the shape of check to
+         add).
+      3. Benchmarking against stock/TE is no longer something you need to
+         do by hand: eligible calls now go through the same kernel_select
+         contest linear/bmm/conv2d/conv3d/group_norm already use (see
+         _patched_sdpa_flash_attn_rocwmma) -- the first call for each
+         distinct (dtype, Q/K/V shape, is_causal) measures this kernel
+         against whatever F.scaled_dot_product_attention would otherwise
+         have been (TE if enabled, stock otherwise) and caches whichever
+         actually won, in memory and on disk (kernel_select.debug_winners()
+         shows the current decisions). Set AMD_TUNED_TORCH_MEASURE_KERNELS=0
+         to go back to the old unconditional-prefer-this-kernel ordering,
+         or AMD_TUNED_TORCH_FLASH_ATTN_ROCWMMA=0 to disable this tier
+         entirely.
+
+    Disable ordering, if you also use the main enable()/disable(): undo
+    these LIFO -- call disable_flash_attn_rocwmma() BEFORE disable(), not
+    after. See enable_conv3d_winograd_fp16's docstring for exactly why
+    (the same _ORIGINALS-bookkeeping hazard applies here)."""
+    global _FLASH_ATTN_ROCWMMA_ENABLED, _flash_attn_rocwmma_fallback
+    if _FLASH_ATTN_ROCWMMA_ENABLED:
+        return
+    if not flash_attn_rocwmma_ops.available():
+        import warnings
+        warnings.warn(
+            "amd_tuned_torch.enable_flash_attn_rocwmma(): JIT build failed, "
+            f"F.scaled_dot_product_attention left as-is ({flash_attn_rocwmma_ops.load_error()})"
+        )
+        return
+    _flash_attn_rocwmma_fallback = F.scaled_dot_product_attention
+    F.scaled_dot_product_attention = _patched_sdpa_flash_attn_rocwmma
+    _FLASH_ATTN_ROCWMMA_ENABLED = True
+
+
+def disable_flash_attn_rocwmma() -> None:
+    """Restore whatever F.scaled_dot_product_attention was before
+    enable_flash_attn_rocwmma()."""
+    global _FLASH_ATTN_ROCWMMA_ENABLED, _flash_attn_rocwmma_fallback
+    if not _FLASH_ATTN_ROCWMMA_ENABLED:
+        return
+    F.scaled_dot_product_attention = _flash_attn_rocwmma_fallback
+    _flash_attn_rocwmma_fallback = None
+    _FLASH_ATTN_ROCWMMA_ENABLED = False
+
+
+# ---------------------------------------------------------------------------
+# RMSNorm (triton-kernels) -- DEFAULT ON, same
+# AMD_TUNED_TORCH_TRITON_KERNELS_RMSNORM bottom-of-file trigger shape as
+# enable_flash_attn_rocwmma above, and safe for the same reason: it
+# degrades to a warning + no-op when triton_kernels isn't installed (see
+# enable_triton_kernels_rmsnorm's `if not triton_kernels_ops.available()`
+# branch) rather than failing hard -- on this checkout specifically,
+# source/triton-kernels isn't vendored/installed, so this trigger fires
+# and immediately no-ops with a warning until that sibling package is
+# installed (see triton_kernels_ops.py's module docstring). Unlike
+# flash_attn_rocwmma, this ALSO has no backward pass at all (unlike
+# te_ops.rms_norm's real torch.autograd.Function), so this tier is
+# grad-gated the same way linear_fp16/bmm_fp16/conv2d/group_norm are
+# (_grad_safe), and nothing here has been benchmarked against either TE's
+# rms_norm or stock F.rms_norm on RX 7900 XTX -- default-on does not mean
+# validated, see enable_triton_kernels_rmsnorm's docstring. Composes with
+# enable()/disable() regardless of call order the same way
+# enable_flash_attn_rocwmma does (captures whatever F.rms_norm currently is
+# as its own fallback) -- same disable-ordering caveat: disable this before
+# the main disable(), not after (see enable_conv3d_winograd_fp16's
+# docstring for the mechanism/why).
+# ---------------------------------------------------------------------------
+
+_TRITON_KERNELS_RMSNORM_ENABLED = False
+_triton_kernels_rmsnorm_fallback: Callable | None = None
+
+_TRITON_KERNELS_RMSNORM_DTYPES = (torch.float16, torch.bfloat16, torch.float32)
+
+
+def _is_triton_kernels_rmsnorm_eligible(input, weight) -> bool:
+    """True only for the shape/dtype/autograd combination
+    triton_kernels.rmsnorm.rmsnorm actually supports: a weight tensor (not
+    None -- F.rms_norm's own signature allows omitting it, but the kernel
+    requires one), same last-dim size as input, and no live autograd
+    (_grad_safe -- the kernel has no backward pass)."""
+    if weight is None or input.shape[-1] != weight.shape[0]:
+        return False
+    if not _grad_safe(input, weight):
+        return False
+    return _usable(input, weight, dtypes=_TRITON_KERNELS_RMSNORM_DTYPES)
+
+
+def _patched_rms_norm_triton_kernels(input, normalized_shape, weight=None, eps=None):
+    if not _is_triton_kernels_rmsnorm_eligible(input, weight):
+        return _triton_kernels_rmsnorm_fallback(input, normalized_shape, weight, eps)
+    try:
+        return triton_kernels_ops.rms_norm(input, weight, eps)
+    except (RuntimeError, TypeError):
+        return _triton_kernels_rmsnorm_fallback(input, normalized_shape, weight, eps)
+
+
+def enable_triton_kernels_rmsnorm() -> None:
+    """Called automatically at import time (see the
+    AMD_TUNED_TORCH_TRITON_KERNELS_RMSNORM trigger at the bottom of this
+    file; set it to "0" to opt out). Tries triton_kernels.rmsnorm.rmsnorm
+    first for eligible calls (see _is_triton_kernels_rmsnorm_eligible: a
+    weight tensor, matching last-dim size, no live autograd), falling back
+    to whatever F.rms_norm currently is -- stock, or TE-patched if the
+    main enable() already ran -- for anything else, if triton_kernels
+    isn't installed, or if it raises.
+
+    Being default-on does NOT mean this has been validated -- it still
+    has not, on any hardware this project has access to. Before trusting
+    output from this path on your actual RX 7900 XTX:
+      1. Confirm `import triton_kernels` succeeds --
+         amd_tuned_torch.triton_kernels_ops.available(). If it doesn't
+         (e.g. source/triton-kernels isn't installed, the default state
+         of this checkout), this function already no-ops with a warning
+         and F.rms_norm is untouched.
+      2. Compare its output against F.rms_norm numerically -- nothing in
+         this package has verified correctness of triton_kernels' rmsnorm
+         against PyTorch's own.
+      3. Benchmark it against both stock and TE's rms_norm (if
+         available) for your actual shapes -- there's no reason to assume
+         this beats either just because it's a dedicated Triton kernel.
+         Set AMD_TUNED_TORCH_TRITON_KERNELS_RMSNORM=0 if it doesn't.
+
+    Disable ordering, if you also use the main enable()/disable(): undo
+    these LIFO -- call disable_triton_kernels_rmsnorm() BEFORE disable(),
+    not after. See enable_conv3d_winograd_fp16's docstring for exactly why
+    (the same _ORIGINALS-bookkeeping hazard applies here)."""
+    global _TRITON_KERNELS_RMSNORM_ENABLED, _triton_kernels_rmsnorm_fallback
+    if _TRITON_KERNELS_RMSNORM_ENABLED:
+        return
+    if not hasattr(F, "rms_norm"):
+        return
+    if not triton_kernels_ops.available():
+        import warnings
+        warnings.warn(
+            "amd_tuned_torch.enable_triton_kernels_rmsnorm(): triton_kernels not installed, "
+            "F.rms_norm left as-is"
+        )
+        return
+    _triton_kernels_rmsnorm_fallback = F.rms_norm
+    F.rms_norm = _patched_rms_norm_triton_kernels
+    _TRITON_KERNELS_RMSNORM_ENABLED = True
+
+
+def disable_triton_kernels_rmsnorm() -> None:
+    """Restore whatever F.rms_norm was before enable_triton_kernels_rmsnorm()."""
+    global _TRITON_KERNELS_RMSNORM_ENABLED, _triton_kernels_rmsnorm_fallback
+    if not _TRITON_KERNELS_RMSNORM_ENABLED:
+        return
+    F.rms_norm = _triton_kernels_rmsnorm_fallback
+    _triton_kernels_rmsnorm_fallback = None
+    _TRITON_KERNELS_RMSNORM_ENABLED = False
+
+
+def mla_decode(x, kv_cache, kv_len, q_proj_down_weight, q_proj_up_weight,
+                kv_proj_down_weight, kv_proj_up_weight, wo_weight,
+                n_heads, nope_dim, rope_dim, v_dim, rope_theta: float = 10000.0):
+    """DeepSeek-V3-style Multi-Head Latent Attention decode step (query
+    sequence length 1), against a compressed KV cache -- never
+    monkeypatched (there is no F.* op for this to replace), so model code
+    using MLA calls this directly. See amd_tuned_torch.mla_ops's module
+    docstring for the weight-absorption algorithm, argument shapes, and
+    what to verify before relying on it (UNVALIDATED on real hardware)."""
+    return mla_ops.mla_decode(
+        x, kv_cache, kv_len, q_proj_down_weight, q_proj_up_weight,
+        kv_proj_down_weight, kv_proj_up_weight, wo_weight,
+        n_heads, nope_dim, rope_dim, v_dim, rope_theta=rope_theta,
+    )
+
+
+def fused_add_rms_norm(x, residual, weight, eps: float = 1e-6):
+    """Fused `residual = residual + x; rms_norm(residual) * weight` in one
+    Triton kernel pass instead of two, with a REAL backward pass -- never
+    monkeypatched (there is no F.* op combining add+rmsnorm to
+    intercept), so model code calls this directly from its decoder-
+    layer's pre-norm epilogue. See amd_tuned_torch.fused_norm_ops's
+    module docstring for the exact calling convention, the backward
+    formula (Liger-Kernel's RMSNorm backward, extended for this op's
+    second "new residual" output), and what to verify before relying on
+    it (UNVALIDATED on real hardware)."""
+    return fused_norm_ops.fused_add_rms_norm(x, residual, weight, eps=eps)
+
+
+def rotary_embedding(positions, query, key, head_size: int, cos_sin_cache):
+    """Fused NeoX-style rotary embedding (Triton), applied to query/key IN
+    PLACE, with a REAL backward pass -- never monkeypatched (there is no
+    F.* op for RoPE to intercept), so model code calls this directly from
+    its attention layer's Q/K projection. Full-head rotation only
+    (rotary_dim == head_size); NOT for MLA's RoPE (see
+    amd_tuned_torch.mla_decode instead -- incompatible shape conventions,
+    explained in amd_tuned_torch.rope_ops's module docstring). See that
+    docstring for the exact calling convention, why the backward pass is
+    just this same rotation with sin negated, and what to verify before
+    relying on this (UNVALIDATED on gfx1100 specifically)."""
+    return rope_ops.rotary_embedding(positions, query, key, head_size, cos_sin_cache)
+
+
+def compute_rope_cos_sin_cache(base: float, rotary_dim: int, max_position_embeddings: int):
+    """[max_position_embeddings, rotary_dim] cos/sin cache for
+    rotary_embedding() -- build once (e.g. at model init), not per call.
+    See amd_tuned_torch.rope_ops.compute_cos_sin_cache."""
+    return rope_ops.compute_cos_sin_cache(base, rotary_dim, max_position_embeddings)
+
+
+def fused_linear_cross_entropy(input, weight, target, bias=None, ce_weight=None,
+                                ignore_index: int = -100, label_smoothing: float = 0.0,
+                                reduction: str = "mean", softcap=None):
+    """Fused final-linear-layer + cross-entropy loss with a REAL backward
+    pass -- the first training-capable (has-a-backward) kernel in this
+    package. Never monkeypatched (F.cross_entropy takes already-computed
+    logits, not hidden_states + a weight matrix), so call this directly
+    from a training loop's loss computation in place of
+    `F.cross_entropy(hidden @ weight.T + bias, target)`. See
+    amd_tuned_torch.fused_ce_ops's module docstring for the memory-saving
+    mechanism (never materializes the full (batch*seq, vocab) logits
+    tensor), the exact calling convention, what was deliberately not
+    ported from upstream Liger-Kernel (amd_tuned_torch/_vendor/
+    liger_fused_ce/NOTICE.md), and what to verify before relying on this
+    for real training (UNVALIDATED on gfx1100 specifically)."""
+    return fused_ce_ops.fused_linear_cross_entropy(
+        input, weight, target, bias=bias, ce_weight=ce_weight,
+        ignore_index=ignore_index, label_smoothing=label_smoothing,
+        reduction=reduction, softcap=softcap,
+    )
+
+
+def bias_swiglu(input, bias=None, clamp_value=None):
+    """Fused bias-add + SwiGLU with a real backward pass -- never
+    monkeypatched (no F.* op for "bias-add then SwiGLU" to intercept), so
+    call this directly from an FFN/MoE block's forward. Unlike every
+    other Triton-backed op in this package, this one is plain PyTorch (no
+    triton dependency, always available) -- see
+    amd_tuned_torch.swiglu_ops's module docstring for the fusion boundary
+    this covers (aiter's fused_silu_mul and TE's silu both require the
+    bias already added), the calling convention, and what to verify
+    before relying on this (UNVALIDATED on real hardware)."""
+    return swiglu_ops.bias_swiglu(input, bias=bias, clamp_value=clamp_value)
+
+
 def compute_smoothquant_scale(weight: torch.Tensor, alpha: float = 0.5):
     """The per-input-channel SmoothQuant scale for `weight`, or None if
     calibrate_smoothquant() hasn't collected activation data for it yet."""
@@ -1222,3 +1707,32 @@ def is_int8_linear_enabled() -> bool:
 
 if os.environ.get("AMD_TUNED_TORCH_AUTOPATCH", "1") != "0":
     enable()
+
+    # Both of these are nested under AUTOPATCH, not independent of it:
+    # AUTOPATCH=0 is this package's existing "do not touch torch at
+    # import time at all" contract (relied on by tests/conftest.py to
+    # keep the test suite import-time-side-effect-free), and
+    # enable_flash_attn_rocwmma() in particular can trigger a real
+    # JIT hipcc/rocWMMA compile on first call (see
+    # flash_attn_rocwmma_ops._ensure_loaded) -- that must never fire
+    # just because someone imported this package, independent of whether
+    # they asked for auto-patching at all. Each still has its own
+    # opt-out on top of AUTOPATCH, for a user who wants the GEMM/conv/norm
+    # tiers auto-installed but not these two specifically.
+    #
+    # Default ON: see the "FlashAttention (rocWMMA)" section above for why
+    # an UNVALIDATED kernel gets this treatment (short version:
+    # enable_flash_attn_rocwmma() already degrades to a warning + no-op on
+    # any build/eligibility failure, so default-on costs nothing on a
+    # machine where it doesn't work). Set AMD_TUNED_TORCH_FLASH_ATTN_ROCWMMA=0
+    # to opt out.
+    if os.environ.get("AMD_TUNED_TORCH_FLASH_ATTN_ROCWMMA", "1") != "0":
+        enable_flash_attn_rocwmma()
+
+    # Default ON for the same reason as flash_attn_rocwmma above: no-ops
+    # with a warning rather than failing when triton_kernels isn't
+    # installed (the default state of this checkout -- see
+    # triton_kernels_ops.py). Set AMD_TUNED_TORCH_TRITON_KERNELS_RMSNORM=0
+    # to opt out.
+    if os.environ.get("AMD_TUNED_TORCH_TRITON_KERNELS_RMSNORM", "1") != "0":
+        enable_triton_kernels_rmsnorm()

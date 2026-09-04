@@ -37,20 +37,25 @@ from typing import Optional, Sequence
 
 import torch
 
-from . import _native as _C
+from . import _native_ck as _C
 
 _CK_DTYPES = (torch.float16, torch.bfloat16)
 
 
 def available() -> bool:
-    """True if the extension was built with Composable Kernel present.
+    """True if the extension was built with the CK conv tier present.
 
     False is normal, not an error: the tier is optional at build time (see
-    setup.py's AMD_TUNED_TORCH_CK_ROOT detection), so callers must treat
+    setup.py's AMD_TUNED_TORCH_CK_CONV detection), so callers must treat
     this as a capability check exactly like aiter_ops.available().
+
+    has_ck() alone is not enough -- it reports that SOME CK tier was built,
+    and the three tiers are switched independently (they cost very
+    different amounts to compile). The ck_conv check is what says this
+    particular one is in.
     """
     try:
-        return bool(_C.has_ck())
+        return bool(_C.has_ck()) and hasattr(_C, "ck_conv")
     except AttributeError:
         return False
 

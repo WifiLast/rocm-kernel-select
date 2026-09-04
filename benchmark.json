@@ -1,0 +1,96 @@
+{
+    "device_info": {
+        "hostname": "wiffzack-To-Be-Filled-By-O-E-M",
+        "python": "3.10.20",
+        "torch": "2.15.0.dev20260820+rocm7.2",
+        "device_name": "AMD Radeon RX 7900 XTX",
+        "backend": "rocm",
+        "backend_version": "7.2.53211"
+    },
+    "cmpext3": {
+        "available": true,
+        "location": "/mnt/data/miniconda3/envs/py310_amd_rocm6.2.4/lib/python3.10/site-packages/cmpext3/__init__.py"
+    },
+    "ops": {
+        "conv3d_fp16": {
+            "stock_ms": 0.6246984481811524,
+            "patched_ms": 0.49209346771240237,
+            "speedup": 1.269471125242104
+        },
+        "conv2d_fp16": {
+            "stock_ms": 0.1822476069132487,
+            "patched_ms": 0.1957071304321289,
+            "speedup": 0.9312261975884014
+        },
+        "conv_transpose2d_fp16": {
+            "stock_ms": 0.16309800148010253,
+            "patched_ms": 0.1628880023956299,
+            "speedup": 1.0012892237696094
+        },
+        "linear_fp16": {
+            "stock_ms": 0.23475886980692545,
+            "patched_ms": 0.20978652636210124,
+            "speedup": 1.1190369270985534
+        },
+        "attention_fp16": {
+            "stock_ms": 0.2570452054341634,
+            "patched_ms": 0.2390810012817383,
+            "speedup": 1.0751385683350712
+        },
+        "group_norm_fp16": {
+            "stock_ms": 0.14391973813374836,
+            "patched_ms": 0.11906346480051676,
+            "speedup": 1.2087649084870553
+        },
+        "layer_norm_fp16": {
+            "stock_ms": 0.09231913089752197,
+            "patched_ms": 0.12951366901397704,
+            "speedup": 0.7128138025922109
+        },
+        "silu_fp16": {
+            "stock_ms": 0.43337074915568036,
+            "patched_ms": 0.37560606002807617,
+            "speedup": 1.1537906207458057
+        },
+        "conv3d_fp32": {
+            "stock_ms": 0.6020781834920247,
+            "patched_ms": 0.5106504122416179,
+            "speedup": 1.1790418044490818
+        },
+        "conv2d_fp32": {
+            "stock_ms": 0.1838175932566325,
+            "patched_ms": 0.1822209358215332,
+            "speedup": 1.0087622063178463
+        },
+        "conv_transpose2d_fp32": {
+            "stock_ms": 0.16248340606689454,
+            "patched_ms": 0.16075606346130372,
+            "speedup": 1.0107451163483274
+        },
+        "linear_fp32": {
+            "stock_ms": 0.5793305079142252,
+            "patched_ms": 0.5562048594156901,
+            "speedup": 1.041577573635062
+        },
+        "attention_fp32": {
+            "stock_ms": 1.3716091156005858,
+            "patched_ms": 1.1981210072835287,
+            "speedup": 1.1448001556290233
+        },
+        "group_norm_fp32": {
+            "stock_ms": 0.10169792970021566,
+            "patched_ms": 0.07661759853363037,
+            "speedup": 1.3273442609347326
+        },
+        "layer_norm_fp32": {
+            "stock_ms": 0.05861473480860392,
+            "patched_ms": 0.09687720139821371,
+            "speedup": 0.6050415780248242
+        },
+        "silu_fp32": {
+            "stock_ms": 0.6550981521606445,
+            "patched_ms": 0.817228889465332,
+            "speedup": 0.8016091459875326
+        }
+    }
+}

@@ -63,15 +63,29 @@ if "amd_tuned_torch._native" not in sys.modules:
     _fake_native = types.ModuleType("amd_tuned_torch._native")
     for _name in NATIVE_OPS:
         setattr(_fake_native, _name, MagicMock(name=_name))
-    # has_ck() must be a real False, not a MagicMock: a truthy mock would
-    # make ck_ops.available() report the Composable Kernel tier as present
-    # in every test, and _native.ck_conv() would then return a MagicMock
-    # rather than None -- i.e. the CK tier would silently "succeed" and
-    # swallow every conv2d/conv3d dispatch these tests are checking. Tests
-    # that want the CK path monkeypatch ck_ops.available themselves, the
-    # same way they do for aiter and TE.
-    _fake_native.has_ck = MagicMock(name="has_ck", return_value=False)
     sys.modules["amd_tuned_torch._native"] = _fake_native
+
+# has_ck()/has_hipblaslt() must be a real False, not a MagicMock: a truthy
+# mock would make ck_ops.available()/hipblaslt_ops.available() report their
+# tier as present in every test, and e.g. _native_ck.ck_conv() would then
+# return a MagicMock rather than None -- i.e. the tier would silently
+# "succeed" and swallow every conv2d/conv3d dispatch these tests are
+# checking. Tests that want the CK/hipBLASLt path monkeypatch that module's
+# `available` themselves, the same way they do for aiter and TE. CK and
+# hipBLASLt are their own extensions now (amd_tuned_torch._native_ck /
+# ._native_hipblaslt, see setup.py) -- faked here the same way _native is,
+# so ck_ops.py/ck_gemm_ops.py/ck_norm_ops.py/hipblaslt_ops.py's own
+# `from . import _native_ck as _C` / `_native_hipblaslt as _C` resolve
+# deterministically regardless of what's actually built on this machine.
+if "amd_tuned_torch._native_ck" not in sys.modules:
+    _fake_native_ck = types.ModuleType("amd_tuned_torch._native_ck")
+    _fake_native_ck.has_ck = MagicMock(name="has_ck", return_value=False)
+    sys.modules["amd_tuned_torch._native_ck"] = _fake_native_ck
+
+if "amd_tuned_torch._native_hipblaslt" not in sys.modules:
+    _fake_native_hipblaslt = types.ModuleType("amd_tuned_torch._native_hipblaslt")
+    _fake_native_hipblaslt.has_hipblaslt = MagicMock(name="has_hipblaslt", return_value=False)
+    sys.modules["amd_tuned_torch._native_hipblaslt"] = _fake_native_hipblaslt
 
 import amd_tuned_torch  # noqa: E402 -- must come after the sys.modules stub above
 import torch  # noqa: E402

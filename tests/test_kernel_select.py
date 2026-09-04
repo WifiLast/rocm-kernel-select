@@ -11,6 +11,8 @@ of breaking the call, and the env kill-switch works.
 """
 from __future__ import annotations
 
+import warnings
+
 import pytest
 import torch
 
@@ -25,6 +27,14 @@ def _clean(monkeypatch):
     # call-count assertions). This suite is the one that DOES test the
     # contest, so it opts back in explicitly.
     monkeypatch.setattr(kernel_select, "_ENABLED", True)
+    # This file's candidates return tagged string sentinels ("out:ck"), not
+    # real tensors -- correctness verification (see kernel_select's own
+    # CORRECTNESS VERIFICATION docstring section) can't meaningfully compare
+    # those, so it's disabled here to keep this file testing SELECTION
+    # policy in isolation, the same way `timings` isolates it from real GPU
+    # timing. TestCorrectnessVerification below tests verification itself,
+    # with real tensors, and turns it back on explicitly.
+    monkeypatch.setattr(kernel_select, "_VERIFY_ENABLED", False)
     kernel_select.reset()
     yield
     kernel_select.reset()
@@ -218,3 +228,76 @@ def test_pick_key_honours_the_kill_switch(monkeypatch):
     monkeypatch.setattr(kernel_select, "_ENABLED", False)
     assert kernel_select.pick_key("group_norm", (torch.float16, (1, 4, 8, 8), 2),
                                   make_candidates(["native", "stock"])) is None
+
+
+def _tagged(name, fn):
+    fn._name = name
+    return name, fn
+
+
+class TestCorrectnessVerification:
+    """kernel_select._contest additionally verifies a non-reference
+    candidate's OUTPUT against the reference before crowning it winner --
+    see the module docstring's CORRECTNESS VERIFICATION section. Real
+    tensors here, unlike the rest of this file's string sentinels, since
+    the whole point is exercising torch.allclose; _VERIFY_ENABLED is
+    turned back on per-test (the file-wide `_clean` fixture turns it off
+    for everything else -- see that fixture's own comment)."""
+
+    def _reference(self):
+        return torch.ones(4, 4)
+
+    def _correct(self):
+        return torch.ones(4, 4) + 1e-6  # well within float32 tolerance
+
+    def _wrong(self):
+        return torch.zeros(4, 4)  # far outside any real tolerance
+
+    def test_correct_fast_candidate_wins(self, monkeypatch, timings):
+        monkeypatch.setattr(kernel_select, "_VERIFY_ENABLED", True)
+        ref, correct = self._reference(), self._correct()
+        candidates = [_tagged("fast", lambda: correct), _tagged("stock", lambda: ref)]
+        timings({"fast": 1.0, "stock": 5.0})
+        out = kernel_select.pick_key("linear", ("k1",), candidates)
+        assert out is correct
+        assert kernel_select.cached_key("linear", ("k1",)) == "fast"
+
+    def test_wrong_fast_candidate_is_excluded_and_reference_used(self, monkeypatch, timings):
+        monkeypatch.setattr(kernel_select, "_VERIFY_ENABLED", True)
+        ref, wrong = self._reference(), self._wrong()
+        candidates = [_tagged("fast", lambda: wrong), _tagged("stock", lambda: ref)]
+        timings({"fast": 1.0, "stock": 5.0})
+        with pytest.warns(UserWarning, match="didn't match"):
+            out = kernel_select.pick_key("linear", ("k2",), candidates)
+        assert out is ref
+        assert kernel_select.cached_key("linear", ("k2",)) == "stock"
+        assert "fast" in kernel_select.debug_bad_candidates()[("linear", "k2")]
+
+    def test_excluded_candidate_never_timed_again(self, monkeypatch, timings):
+        monkeypatch.setattr(kernel_select, "_VERIFY_ENABLED", True)
+        ref, wrong = self._reference(), self._wrong()
+        candidates = [_tagged("fast", lambda: wrong), _tagged("stock", lambda: ref)]
+        calls = timings({"fast": 1.0, "stock": 5.0})
+        with pytest.warns(UserWarning):
+            kernel_select.pick_key("linear", ("k3",), candidates)
+        assert calls["fast"] == 1
+        kernel_select.pick_key("linear", ("k3",), candidates)  # cached "stock" winner path
+        assert calls["fast"] == 1  # never re-timed once verified bad
+
+    def test_reference_never_needs_verification(self, monkeypatch, timings):
+        monkeypatch.setattr(kernel_select, "_VERIFY_ENABLED", True)
+        ref = self._reference()
+        candidates = [_tagged("stock", lambda: ref)]
+        timings({"stock": 1.0})
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            out = kernel_select.pick_key("linear", ("k4",), candidates)
+        assert out is ref
+
+    def test_verify_disabled_trusts_fastest_regardless(self, monkeypatch, timings):
+        monkeypatch.setattr(kernel_select, "_VERIFY_ENABLED", False)
+        ref, wrong = self._reference(), self._wrong()
+        candidates = [_tagged("fast", lambda: wrong), _tagged("stock", lambda: ref)]
+        timings({"fast": 1.0, "stock": 5.0})
+        out = kernel_select.pick_key("linear", ("k5",), candidates)
+        assert out is wrong  # old behaviour: fastest wins unconditionally

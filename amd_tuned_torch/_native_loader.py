@@ -32,6 +32,15 @@ which libtorch an arbitrary .so was linked against without loading it, and
 loading it is the dangerous act. So the fallback is used only when the
 keyed lookup finds nothing, and _describe() reports which path was taken
 so a confusing crash has somewhere to start.
+
+MULTIPLE EXTENSIONS. amd_tuned_torch._native is no longer the only compiled
+extension -- Composable Kernel and hipBLASLt each got split into their own
+(amd_tuned_torch._native_ck / ._native_hipblaslt, see setup.py), so every
+function here takes a `module_name` parameter instead of a hardcoded
+constant. `_find` matches the exact stem (`_native_ck.cpython-....so`'s stem
+is `_native_ck`), not a prefix -- a naive `startswith("_native")` would also
+match `_native_ck...` and `_native_hipblaslt...` when looking for the core
+`_native` module, since they share that prefix.
 """
 from __future__ import annotations
 
@@ -41,7 +50,7 @@ import sys
 from typing import Optional
 
 _BUILDS_DIRNAME = "_native_builds"
-_MODULE_NAME = "_native"
+_DEFAULT_MODULE_NAME = "_native"
 
 
 def build_key(torch_version: Optional[str] = None) -> str:
@@ -60,50 +69,68 @@ def build_key(torch_version: Optional[str] = None) -> str:
     return f"torch-{safe}-cp{sys.version_info.major}{sys.version_info.minor}"
 
 
-def _find(directory: str) -> Optional[str]:
+def _find(directory: str, module_name: str) -> Optional[str]:
     if not os.path.isdir(directory):
         return None
     for name in sorted(os.listdir(directory)):
-        if name.startswith(_MODULE_NAME) and name.endswith((".so", ".pyd")):
+        # Exact stem match, not startswith: "_native_ck...so" and
+        # "_native_hipblaslt...so" both start with "_native" too, and would
+        # otherwise be mistaken for the core module (see module docstring).
+        stem = name.split(".", 1)[0]
+        if stem == module_name and name.endswith((".so", ".pyd")):
             return os.path.join(directory, name)
     return None
 
 
-def locate(package_dir: str) -> tuple[Optional[str], str]:
+def locate(package_dir: str, module_name: str = _DEFAULT_MODULE_NAME) -> tuple[Optional[str], str]:
     """(path to the extension, how it was chosen)."""
     keyed = os.path.join(package_dir, _BUILDS_DIRNAME, build_key())
-    found = _find(keyed)
+    found = _find(keyed, module_name)
     if found:
         return found, f"matched this torch ({build_key()})"
-    found = _find(package_dir)
+    found = _find(package_dir, module_name)
     if found:
         return found, "fallback: unkeyed build beside __init__.py"
     return None, "no build found"
 
 
-def load(package_name: str, package_dir: str):
-    """Import the extension as `<package>._native` from wherever it lives.
+def load(package_name: str, package_dir: str, module_name: str = _DEFAULT_MODULE_NAME,
+         required: bool = True):
+    """Import the extension as `<package>.<module_name>` from wherever it lives.
 
     Registered in sys.modules under the canonical name so the rest of the
-    package's `from . import _native as _C` keeps working unchanged.
+    package's `from . import _native as _C` (or `_native_ck`/
+    `_native_hipblaslt`) keeps working unchanged.
+
+    `required=False` is for the optional CK/hipBLASLt extensions: unlike the
+    core `_native` extension (hard-required at import time, same as always),
+    a build predating this module's split, or a partial rebuild that never
+    ran for these two, should degrade to "tier unavailable" -- the same way
+    aiter/TransformerEngine being uninstalled does -- rather than making
+    `import amd_tuned_torch` itself fail. Returns None instead of raising in
+    that case.
     """
-    qualified = f"{package_name}.{_MODULE_NAME}"
+    qualified = f"{package_name}.{module_name}"
     if qualified in sys.modules:
         return sys.modules[qualified]
 
-    path, how = locate(package_dir)
+    path, how = locate(package_dir, module_name)
     if path is None:
+        if not required:
+            return None
         import torch
         raise ImportError(
-            f"amd_tuned_torch native extension not built for torch "
+            f"amd_tuned_torch native extension '{module_name}' not built for torch "
             f"{torch.__version__}.\n"
             f"  Looked for: {os.path.join(package_dir, _BUILDS_DIRNAME, build_key())}/\n"
-            f"          and: {package_dir}/{_MODULE_NAME}*.so\n"
+            f"          and: {package_dir}/{module_name}*.so\n"
             f"  Build it with: pip install -e . --no-build-isolation"
         )
 
     spec = importlib.util.spec_from_file_location(qualified, path)
     if spec is None or spec.loader is None:
+        if not required:
+            return None
         raise ImportError(f"could not load the native extension from {path}")
     module = importlib.util.module_from_spec(spec)
     sys.modules[qualified] = module
@@ -113,16 +140,18 @@ def load(package_name: str, package_dir: str):
         # A failed load must not leave a half-initialised module behind for
         # the next importer to find and believe.
         sys.modules.pop(qualified, None)
+        if not required:
+            return None
         raise
     module.__amd_tuned_torch_origin__ = (path, how)
     return module
 
 
-def describe() -> str:
+def describe(module_name: str = _DEFAULT_MODULE_NAME) -> str:
     """Which extension is loaded and why -- for bug reports and confusion."""
-    mod = sys.modules.get("amd_tuned_torch._native")
+    mod = sys.modules.get(f"amd_tuned_torch.{module_name}")
     origin = getattr(mod, "__amd_tuned_torch_origin__", None)
     if origin is None:
-        return "amd_tuned_torch._native: not loaded"
+        return f"amd_tuned_torch.{module_name}: not loaded"
     path, how = origin
-    return f"amd_tuned_torch._native: {path}\n  ({how})"
+    return f"amd_tuned_torch.{module_name}: {path}\n  ({how})"
