@@ -119,6 +119,7 @@ declining.
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
 import sys
@@ -154,20 +155,105 @@ _TOLERANCES = {
 _DEFAULT_TOLERANCE = (2e-2, 2e-2)
 
 
-def _verify(candidate_out, reference_out) -> bool:
+# Fraction of the reference output's own RMS magnitude that _verify's
+# absolute tolerance is allowed to grow to. See _verify's docstring for
+# the three measured cases that made a purely absolute atol reject
+# correct kernels; `rtol` is reused as that fraction so the bar stays
+# "the same relative slack, measured against the tensor's scale instead
+# of one element's".
+_VERIFY_SCALE_SAMPLE = 1 << 20
+
+
+def _reference_scale(reference_out) -> "Optional[float]":
+    """RMS magnitude of `reference_out`, or None if it can't be measured.
+
+    Sampled with a stride rather than reduced whole: a reference output
+    here can be hundreds of MB (a VAE decoder's 1x128x2048x1024 fp16
+    activation is 512MB), and upcasting all of it to float32 to compute
+    one scalar would cost more than the convolution being verified. A
+    strided sample spans the whole tensor, unlike a prefix, so a padded
+    border or an all-zero leading region can't stand in for the whole."""
+    try:
+        flat = reference_out.flatten()
+        step = max(1, flat.numel() // _VERIFY_SCALE_SAMPLE)
+        sample = flat[::step].float()
+        scale = float(sample.pow(2).mean().sqrt())
+    except (RuntimeError, TypeError, ValueError, AttributeError, ZeroDivisionError):
+        return None
+    return scale if math.isfinite(scale) and scale > 0.0 else None
+
+
+def _verify(candidate_out, reference_out, tolerance: "Optional[tuple[float, float]]" = None) -> bool:
     """Best-effort numerical agreement check. A comparison that itself
     can't run (shape mismatch, an exotic dtype, a non-tensor return) is
     treated as a verification FAILURE, not a pass -- unlike a thunk
     returning None (a candidate declining a problem it recognizes it can't
     handle), "couldn't even compare" must never be silently treated as
-    "fine"."""
+    "fine".
+
+    THE BAR IS RELATIVE TO THE OUTPUT'S MAGNITUDE, not absolute. `atol`
+    from the table below (or from `tolerance`) is a floor; the bar
+    actually used is `max(atol, rtol * RMS(reference_out))`. A fixed atol
+    asks the near-zero elements of a large accumulation to agree to a
+    precision they never had, and since a rejection here is a PERMANENT
+    per-shape blacklist persisted to disk, that permanently loses correct,
+    faster kernels. All three cases measured on gfx1100 were of exactly
+    that shape -- a handful of near-zero elements out of millions, on
+    candidates whose worst disagreement was a rounding artifact:
+
+      * CK conv3d fp16, 1x512x8x32x32 k3: 11 of 4.19M elements outside
+        (1e-2, 1e-2), median |ref| among them 0.06, while CK's error
+        against an fp32 reference was IDENTICAL to stock's (max 0.417,
+        mean 0.0207). Cost: 1.8x, CK 1.70ms vs the elected 3.0ms.
+      * FFT conv3d fp32, 1x32x32x64x64 k15: 158 of 4.19M outside
+        (1e-3, 1e-4), median |ref| 0.034, worst disagreement 7.3e-4 on an
+        output whose RMS is 291 -- 2.5e-6 relative. Cost: 157x
+        (6845ms vs 43.6ms).
+      * CK conv2d fp16, 2x640x128x64->640 k3 stride2 (a real SDXL-style
+        downsampling conv, see miopen.logs): worst disagreement 0.375 on
+        an output RMS of 75.4 (0.5%). Cost: 2.24x, CK 0.564ms vs stock's
+        1.262ms on the one shape MIOpen serves with im2col+GEMM rather
+        than Winograd.
+
+    With the scaled bar those three pass with 4x, 400x and 2x of headroom
+    respectively, while a genuinely wrong candidate is off by order-RMS
+    (100x the bar) and even a subtly wrong one -- a dropped channel, say,
+    which costs RMS/sqrt(C) -- stays an order of magnitude above it.
+
+    `tolerance`, when given, overrides the `_TOLERANCES` dtype lookup for
+    the (rtol, atol) pair -- for a contest between algorithmically
+    DIFFERENT implementations (not just different tile/instance choices of
+    the same algorithm), a dtype-keyed default calibrated for
+    direct-convolution/GEMM-style candidates can be the wrong bar. E.g.
+    FFT-based convolution (amd_tuned_torch.fftconv_ops) accumulates
+    rounding error differently from direct convolution -- correct, but
+    with a different rtol than fp32's default (1e-4); see
+    fftconv_ops.fftconv_tolerance for the looser pair that contest passes
+    instead of this module's shared default."""
     try:
-        rtol, atol = _TOLERANCES.get(candidate_out.dtype, _DEFAULT_TOLERANCE)
+        if tolerance is not None:
+            rtol, atol = tolerance
+        else:
+            rtol, atol = _TOLERANCES.get(candidate_out.dtype, _DEFAULT_TOLERANCE)
+        scale = _reference_scale(reference_out)
+        if scale is not None:
+            atol = max(atol, rtol * scale)
         return bool(torch.allclose(candidate_out.float(), reference_out.float(),
                                     rtol=rtol, atol=atol, equal_nan=True))
     except (RuntimeError, TypeError, ValueError, AttributeError):
         return False
 
+# Bumped whenever _verify's bar changes. A blacklist entry is a RECORD OF
+# A JUDGEMENT, not a fact about the kernel: an entry written when the bar
+# was purely absolute (see _verify's docstring for the three correct
+# kernels that bar rejected) is not evidence under the current one, and
+# without this it would outlive the fix forever -- the entries are
+# persisted, and a cached winner short-circuits the contest that would
+# otherwise re-measure. On a version mismatch the blacklist is dropped
+# AND the winners for exactly those shapes are dropped with it, so each
+# affected shape is re-contested once and every other cached decision
+# survives untouched.
+_VERIFY_BAR_VERSION = 2
 _DISK_CACHE_ENABLED = os.environ.get("AMD_TUNED_TORCH_KERNEL_SELECT_CACHE", "1") != "0"
 _CACHE_DIR = os.environ.get(
     "AMD_TUNED_TORCH_KERNEL_SELECT_CACHE_DIR",
@@ -236,17 +322,24 @@ def _load_disk_cache() -> None:
         bad_raw = raw.get("bad", {})
     else:
         winners_raw, bad_raw = raw, {}  # old flat-format file
+    # Blacklists recorded under a superseded verification bar are discarded,
+    # along with the winners of those shapes so they get re-contested once
+    # -- see _VERIFY_BAR_VERSION.
+    stale_judgements = raw.get("verify_bar") != _VERIFY_BAR_VERSION
     with _lock:
         for encoded_key_str, winner in winners_raw.items():
+            if stale_judgements and encoded_key_str in bad_raw:
+                continue
             try:
                 _winners.setdefault(_decode_key(encoded_key_str), winner)
             except (ValueError, TypeError):
                 continue
-        for encoded_key_str, names in bad_raw.items():
-            try:
-                _bad_candidates.setdefault(_decode_key(encoded_key_str), set()).update(names)
-            except (ValueError, TypeError):
-                continue
+        if not stale_judgements:
+            for encoded_key_str, names in bad_raw.items():
+                try:
+                    _bad_candidates.setdefault(_decode_key(encoded_key_str), set()).update(names)
+                except (ValueError, TypeError):
+                    continue
 
 
 def _save_disk_cache() -> None:
@@ -263,6 +356,7 @@ def _save_disk_cache() -> None:
         os.makedirs(os.path.dirname(path), exist_ok=True)
         with _lock:
             raw = {
+                "verify_bar": _VERIFY_BAR_VERSION,
                 "winners": {json.dumps([_encode(x) for x in key]): winner
                             for key, winner in _winners.items()},
                 "bad": {json.dumps([_encode(x) for x in key]): sorted(names)
@@ -275,9 +369,11 @@ def _save_disk_cache() -> None:
     except OSError:
         pass
 
-# Timed runs per candidate. One is enough: this picks between kernels that
-# differ by integer factors, not by percentages, and every extra run is
-# latency the first call to a new shape pays.
+# Timed runs per candidate, each timed separately so _time can take the
+# fastest rather than the mean (see its docstring: a single delayed call
+# was flipping decisions). Kept small either way -- this picks between
+# kernels that differ by integer factors, not by percentages, and every
+# extra run is latency the first call to a new shape pays.
 _WARMUP = 2
 _ITERS = 3
 
@@ -303,23 +399,42 @@ def _norm(v):
 
 
 def _time(fn) -> Optional[float]:
-    """Median-free single measurement of `fn`, or None if it can't run.
+    """Fastest of `_ITERS` timed runs of `fn`, or None if it can't run.
 
     Returns None rather than raising so an unsupported candidate simply
     loses the contest instead of breaking the call.
-    """
+
+    WHY THE MINIMUM AND NOT THE MEAN. Per-call times here are not
+    symmetrically noisy -- they have a long right tail and no left tail,
+    because a call can be delayed (driver work, another process on the
+    GPU, a kernel launch queued behind something else) but cannot run
+    faster than the kernel. With `_ITERS` this small, one delayed call
+    moves a mean far enough to flip a decision: measured call-by-call on
+    the CK tier for 2x640x128x64->640 k3 stride2 (a real downsampling
+    conv from miopen.logs), 1.47 1.31 6.29 1.35 1.32 7.49 1.32 ms -- a
+    steady 1.3ms with occasional ~6ms outliers. Averaged over 3 runs
+    that reads as ~3ms and loses to stock's 1.6ms; the minimum reads
+    1.31ms and wins, which is the truth (CK is 2.24x faster than stock
+    on that shape at 20 iterations). Since the contest's whole job is
+    ranking candidates against each other, the least-contaminated
+    estimate of each one is what it should compare, and the outliers
+    belong to the machine, not the kernel.
+
+    Costs nothing extra: the same `_ITERS` calls, timed individually with
+    one event pair each instead of one pair around the whole loop, and
+    still a single synchronize at the end."""
     try:
         for _ in range(_WARMUP):
             if fn() is None:
                 return None
         torch.cuda.synchronize()
-        start, end = torch.cuda.Event(True), torch.cuda.Event(True)
-        start.record()
-        for _ in range(_ITERS):
+        events = [(torch.cuda.Event(True), torch.cuda.Event(True)) for _ in range(_ITERS)]
+        for start, end in events:
+            start.record()
             fn()
-        end.record()
+            end.record()
         torch.cuda.synchronize()
-        return start.elapsed_time(end) / _ITERS
+        return min(start.elapsed_time(end) for start, end in events)
     except (RuntimeError, TypeError, AssertionError):
         return None
 
@@ -349,31 +464,42 @@ def cached_key(kind: str, key) -> Optional[str]:
         return _winners.get((kind,) + tuple(key))
 
 
-def pick_key(kind: str, key, candidates: "list[tuple[str, Callable]]"):
+def pick_key(kind: str, key, candidates: "list[tuple[str, Callable]]",
+             tolerance: "Optional[tuple[float, float]]" = None):
     """Contest over a caller-supplied key, for ops whose identity isn't
     (input, weight, stride, padding, dilation) -- group_norm keys on the
     group count instead. Same policy as `pick`, including honouring the
-    kill switch here rather than relying on every caller to check first."""
+    kill switch here rather than relying on every caller to check first.
+
+    `tolerance`, when given, overrides this contest's numerical-verification
+    bar -- see `_verify`'s docstring for why (contesting algorithmically
+    different implementations, not just different instances of the same
+    one, can need a looser bar than `_TOLERANCES`' dtype defaults)."""
     if not _ENABLED:
         return None
-    return _contest((kind,) + tuple(key), candidates)
+    return _contest((kind,) + tuple(key), candidates, tolerance=tolerance)
 
 
 def pick(kind: str, input, weight, stride, padding, dilation,
-         candidates: "list[tuple[str, Callable]]"):
+         candidates: "list[tuple[str, Callable]]",
+         tolerance: "Optional[tuple[float, float]]" = None):
     """Returns the output of whichever candidate is fastest for this shape.
 
     `candidates` is ordered best-guess-first and each entry is
     (name, thunk); a thunk returns None to decline (the CK tier does this
     for problems no compiled instance supports). The last candidate is
     assumed to always work -- it is stock -- so there is always a winner.
-    """
+
+    `tolerance`, when given, overrides this contest's numerical-verification
+    bar -- see `_verify`'s docstring."""
     if not _ENABLED:
         return None
-    return _contest(_key(kind, input, weight, stride, padding, dilation), candidates)
+    return _contest(_key(kind, input, weight, stride, padding, dilation), candidates,
+                     tolerance=tolerance)
 
 
-def _contest(key, candidates: "list[tuple[str, Callable]]"):
+def _contest(key, candidates: "list[tuple[str, Callable]]",
+             tolerance: "Optional[tuple[float, float]]" = None):
     reference_name = candidates[-1][0] if candidates else None
 
     with _lock:
@@ -438,7 +564,7 @@ def _contest(key, candidates: "list[tuple[str, Callable]]"):
                     _winners[key] = name
                 _save_disk_cache()
                 return out
-        if _verify(out, reference_out):
+        if _verify(out, reference_out, tolerance=tolerance):
             with _lock:
                 _winners[key] = name
             _save_disk_cache()

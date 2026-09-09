@@ -43,3 +43,24 @@ class TestFusedSiluMul:
         preallocated = torch.empty(4, 4)
         aiter_ops.fused_silu_mul(x, out=preallocated)
         fake_fused_silu_mul.assert_called_once_with(x, out=preallocated)
+
+
+class TestQuantizeWeightInferenceTensor:
+    """Same inference-tensor hazard the occupancy cache had (see
+    aiter_ops._tensor_version): a weight cast inside an inference_mode
+    block has no version counter, and reading one for the cache key would
+    raise instead of quantizing."""
+
+    def test_quantize_weight_handles_an_inference_tensor(self):
+        with torch.inference_mode():
+            w = torch.randn(4, 8).half().float()   # created here -> inference tensor
+            assert aiter_ops._tensor_version(w) is None
+            q, scale = aiter_ops._quantize_weight(w)
+        assert q.dtype == torch.int8 and q.shape == (4, 8)
+        assert scale.shape == (1, 4)
+
+    def test_ordinary_weight_still_caches(self):
+        w = torch.randn(4, 8)
+        first_q, first_scale = aiter_ops._quantize_weight(w)
+        second_q, second_scale = aiter_ops._quantize_weight(w)
+        assert second_q is first_q and second_scale is first_scale

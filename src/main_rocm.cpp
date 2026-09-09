@@ -35,11 +35,13 @@
 #include <hip/hip_runtime.h>
 #include <vector>
 #include <array>
+#include <cstring>
 #include <mutex>
 #include <unordered_map>
 #include <tuple>
 
 #include "dispatch_common.h"
+#include "cuda/iu4_gemm_fwd.hpp"
 
 // Composable Kernel and hipBLASLt bindings used to live in this file's own
 // PYBIND11_MODULE, gated by #ifdef -- but that meant all three tiers (this
@@ -846,6 +848,84 @@ std::tuple<int, int, int, int> conv2d_fp16_variant_diagnostics(int64_t variant_i
     return std::make_tuple(num_regs, static_lds_bytes, dynamic_lds_bytes, max_active_blocks_per_cu);
 }
 
+// ------------------------------------------------------------------
+// Experimental gfx1100 WMMA integer GEMM (src/cuda/iu4_gemm_fwd.cu) --
+// see amd_tuned_torch/_vendor/gfx1100_iu4_gemm/NOTICE.md for where this
+// came from and amd_tuned_torch/iu4_gemm_ops.py for why it is opt-in only
+// (never entered into kernel_select's stock-vs-candidate contest). Raw
+// packed-integer matmul, int32 accumulate, no dequant/bias epilogue --
+// that happens in Python around these.
+// ------------------------------------------------------------------
+
+bool iu4_gemm_supported() {
+    // Matches the upstream probe's own restriction: the WMMA
+    // iu4/iu8 instructions this kernel emits are gfx11-specific, and this
+    // extension can be rebuilt for other targets via AMD_TUNED_TORCH_GPU_ARCH
+    // (see setup.py), so this has to be a runtime device check, not a
+    // compile-time assumption.
+    hipDeviceProp_t properties{};
+    if (hipGetDeviceProperties(&properties, 0) != hipSuccess) {
+        return false;
+    }
+    return std::strncmp(properties.gcnArchName, "gfx1100", 7) == 0;
+}
+
+namespace {
+void check_iu_gemm_inputs(const torch::Tensor& a, const torch::Tensor& b, int a_cols, int b_cols) {
+    TORCH_CHECK(iu4_gemm_supported(), "iu4/iu8 GEMM requires gfx1100 (RDNA3 WMMA int4/int8)");
+    TORCH_CHECK(a.is_cuda() && b.is_cuda(), "iu_gemm inputs must be on the GPU");
+    TORCH_CHECK(a.is_contiguous() && b.is_contiguous(), "iu_gemm inputs must be contiguous");
+    TORCH_CHECK(a.dim() == 2 && b.dim() == 2, "iu_gemm expects 2D [M,K]/[N,K] inputs");
+    TORCH_CHECK(a.size(1) == a_cols && b.size(1) == b_cols,
+                "iu_gemm: A/B row byte-width mismatch with the requested K");
+}
+}  // namespace
+
+// a_packed/b_packed: [M, row_bytes]/[N, row_bytes] uint8, two signed
+// 4-bit nibbles per byte (see amd_tuned_torch.iu4_gemm_ops.pack_int4_rows).
+// k is the true (unpacked) reduction dimension -- row_bytes is
+// ceil(k,16)/2, allocated by the caller, not derived here, so the tail
+// path's bounds check always sees the real k.
+torch::Tensor iu4_gemm(torch::Tensor a_packed, torch::Tensor b_packed, int64_t k) {
+    const int row_bytes = (int)a_packed.size(1);
+    check_iu_gemm_inputs(a_packed, b_packed, row_bytes, row_bytes);
+    TORCH_CHECK(a_packed.dtype() == torch::kUInt8 && b_packed.dtype() == torch::kUInt8,
+                "iu4_gemm expects packed uint8 inputs");
+    const int64_t m = a_packed.size(0);
+    const int64_t n = b_packed.size(0);
+    auto output = torch::empty({m, n}, a_packed.options().dtype(torch::kInt32));
+    launch_iu4_gemm(a_packed.data_ptr<uint8_t>(), b_packed.data_ptr<uint8_t>(),
+                     output.data_ptr<int32_t>(), (int)m, (int)n, (int)k, row_bytes, row_bytes,
+                     current_stream());
+    return output;
+}
+
+torch::Tensor iu8_gemm(torch::Tensor a, torch::Tensor b) {
+    const int k = (int)a.size(1);
+    check_iu_gemm_inputs(a, b, k, k);
+    TORCH_CHECK(a.dtype() == torch::kInt8 && b.dtype() == torch::kInt8,
+                "iu8_gemm expects int8 inputs");
+    const int64_t m = a.size(0);
+    const int64_t n = b.size(0);
+    auto output = torch::empty({m, n}, a.options().dtype(torch::kInt32));
+    launch_iu8_gemm(a.data_ptr<int8_t>(), b.data_ptr<int8_t>(), output.data_ptr<int32_t>(),
+                     (int)m, (int)n, k, k, k, current_stream());
+    return output;
+}
+
+torch::Tensor dot4_i8_gemm(torch::Tensor a, torch::Tensor b) {
+    const int k = (int)a.size(1);
+    check_iu_gemm_inputs(a, b, k, k);
+    TORCH_CHECK(a.dtype() == torch::kInt8 && b.dtype() == torch::kInt8,
+                "dot4_i8_gemm expects int8 inputs");
+    const int64_t m = a.size(0);
+    const int64_t n = b.size(0);
+    auto output = torch::empty({m, n}, a.options().dtype(torch::kInt32));
+    launch_dot4_i8_gemm(a.data_ptr<int8_t>(), b.data_ptr<int8_t>(), output.data_ptr<int32_t>(),
+                         (int)m, (int)n, k, k, k, current_stream());
+    return output;
+}
+
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.def("group_norm", &custom_group_norm_forward, "Hand-written HIP GroupNorm");
     m.def("conv2d", &custom_conv2d_forward, "Hand-written HIP Conv2d (fp16/fp32, groups=1)");
@@ -875,4 +955,19 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
           "cached for this exact shape, or None if that shape hasn't been run "
           "through amd_tuned_torch.ops.conv2d(...) yet. Never triggers a benchmark "
           "itself -- pure lookup.");
+    m.def("iu4_gemm_supported", &iu4_gemm_supported,
+          "True if the current device is gfx1100 (required by the iu4/iu8/dot4_i8 "
+          "WMMA integer GEMM kernels below -- see "
+          "amd_tuned_torch/_vendor/gfx1100_iu4_gemm/NOTICE.md).");
+    m.def("iu4_gemm", &iu4_gemm,
+          "EXPERIMENTAL, opt-in only (see amd_tuned_torch.iu4_gemm_ops): raw "
+          "packed-int4 x packed-int4 -> int32 GEMM via gfx1100 WMMA. No dequant/"
+          "bias epilogue -- caller supplies packed nibble rows and the true K.");
+    m.def("iu8_gemm", &iu8_gemm,
+          "EXPERIMENTAL, opt-in only (see amd_tuned_torch.iu4_gemm_ops): raw "
+          "int8 x int8 -> int32 GEMM via gfx1100 WMMA. No dequant/bias epilogue.");
+    m.def("dot4_i8_gemm", &dot4_i8_gemm,
+          "EXPERIMENTAL, opt-in only (see amd_tuned_torch.iu4_gemm_ops): raw "
+          "int8 x int8 -> int32 GEMM via v_dot4_i32_i8 -- small/tail fallback "
+          "control for iu8_gemm, not expected to win at WMMA-tile sizes.");
 }

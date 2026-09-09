@@ -38,7 +38,11 @@ if str(PACKAGE_ROOT) not in sys.path:
 # conv3d_fp16_winograd_bt8_bc8 is testing/opt-in-only (see
 # amd_tuned_torch.enable_conv3d_winograd_fp16) -- still exported on
 # amd_tuned_torch.ops like every other kernel here, so it needs a mock too.
-NATIVE_OPS = ["group_norm", "conv2d", "conv3d", "conv3d_fp16_winograd_bt8_bc8"]
+# iu4_gemm_supported/iu4_gemm/iu8_gemm/dot4_i8_gemm back
+# amd_tuned_torch.iu4_gemm_ops (EXPERIMENTAL, opt-in only -- see that
+# module's docstring); mocked the same way for the same reason.
+NATIVE_OPS = ["group_norm", "conv2d", "conv3d", "conv3d_fp16_winograd_bt8_bc8",
+              "iu4_gemm_supported", "iu4_gemm", "iu8_gemm", "dot4_i8_gemm"]
 
 # Every function exported by amd_tuned_torch/te_ops.py (besides `available`).
 TE_OPS = ["layer_norm", "rms_norm", "gelu", "silu", "scaled_dot_product_attention"]

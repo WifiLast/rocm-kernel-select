@@ -82,6 +82,35 @@ def available() -> bool:
         return False
 
 
+def is_eligible(input: torch.Tensor, weight: torch.Tensor, bias: Optional[torch.Tensor] = None) -> bool:
+    """Every shape/dtype/device check `linear` applies before ever calling
+    the native extension -- pulled out into its own function (rather than
+    inlined in `linear` the way it used to be) so
+    amd_tuned_torch.compile_ops's register_fake for this op can replicate
+    the exact same eligibility decision at trace time instead of
+    duplicating it by hand. Every check here inspects only static tensor
+    metadata (dtype/dim/is_cuda/shape) -- none of it is data-dependent --
+    so it is exactly as valid to call on a FakeTensor under
+    torch.compile/FakeTensorMode as on a real one; `available()` is a
+    plain build-time capability flag, equally valid either way."""
+    if not available():
+        return False
+    if not isinstance(input, torch.Tensor) or not isinstance(weight, torch.Tensor):
+        return False
+    if not input.is_cuda or not weight.is_cuda:
+        return False
+    if input.dtype not in _DTYPES or weight.dtype != input.dtype:
+        return False
+    if input.dim() < 2 or weight.dim() != 2:
+        return False
+    if bias is not None:
+        if not bias.is_cuda or bias.dtype != input.dtype:
+            return False
+        if bias.dim() != 1 or bias.size(0) != weight.size(0):
+            return False
+    return True
+
+
 def linear(input: torch.Tensor, weight: torch.Tensor, bias: Optional[torch.Tensor] = None,
            epilogue: int = EPILOGUE_NONE) -> Optional[torch.Tensor]:
     """Y = X @ W^T (+ bias), `epilogue` fused. None if unavailable/unsupported.
@@ -89,21 +118,8 @@ def linear(input: torch.Tensor, weight: torch.Tensor, bias: Optional[torch.Tenso
     Weight is [N, K] and is passed through untransposed: CK's Row/Col/Row
     layout triple is F.linear's own layout, so no operand is copied.
     """
-    if not available():
+    if not is_eligible(input, weight, bias):
         return None
-    if not isinstance(input, torch.Tensor) or not isinstance(weight, torch.Tensor):
-        return None
-    if not input.is_cuda or not weight.is_cuda:
-        return None
-    if input.dtype not in _DTYPES or weight.dtype != input.dtype:
-        return None
-    if input.dim() < 2 or weight.dim() != 2:
-        return None
-    if bias is not None:
-        if not bias.is_cuda or bias.dtype != input.dtype:
-            return None
-        if bias.dim() != 1 or bias.size(0) != weight.size(0):
-            return None
     try:
         return _C.ck_gemm_linear(input, weight, bias, int(epilogue))
     except (RuntimeError, TypeError):

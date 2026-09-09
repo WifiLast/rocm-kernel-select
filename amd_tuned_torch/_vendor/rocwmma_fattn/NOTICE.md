@@ -10,9 +10,51 @@ directory are vendored from:
 
 ## What was changed from upstream (Apache 2.0 §4(b) requires marking this)
 
-- `host.cpp`, `kernel_fp16.cu`, `kernel_bf16.cu`: **not modified** --
-  copied verbatim, only a short attribution header comment added at the
-  top of each file pointing back here.
+- `host.cpp`: **not modified** -- copied verbatim, only a short
+  attribution header comment added at the top pointing back here.
+- `kernel_fp16.cu`, `kernel_bf16.cu`: **modified**. Beyond the
+  attribution header, these carry correctness and performance fixes made
+  against real gfx1100 hardware; each is marked with a `FIX` comment at
+  the site. The correctness ones, in the order they were found:
+
+  1. **Forward**: K/V's sequence dimension was never padded to a multiple
+     of `Bc` even though the launch config and every `Kj`/`Vj` read assume
+     a full `Tc*Bc` allocation (read past the end of K/V for any `n_kv`
+     not a multiple of `Bc`, e.g. CLIP's 77-token cross-attention).
+  2. **Backward**: `Q`/`K`/`V`/`O`/`dO`/`L` `.contiguous()` calls were
+     commented out while every kernel does packed-layout pointer
+     arithmetic.
+  3. **Backward**: `dQ` never received the `ln(2)` rescale that converts
+     out of the exp2-domain the softmax works in -- `mul_add_AT_B` applies
+     it for `dK` but `mul_add_A_B`, the `dQ` GEMM, takes no scale argument
+     at all. `dQ` came out `log2(e)` = 1.4427x too large in every shape
+     and both dtypes. Now folded into `dSi` once, so `dK`'s GEMM scale
+     drops to `1.0f`.
+  4. **Backward**: `dQ` was accumulated by workgroups indexed by `Tc_j`
+     while `dQi` is selected by `Tr_i`, so all `Tc` workgroups of a
+     `(b, h)` read-modify-wrote the same `dQ` rows non-atomically and all
+     but one block's contribution was lost. The kernel now runs as two
+     passes over the same tile grid -- `dK`/`dV` indexed by `Tc_j`, `dQ`
+     by `Tr_i` -- so both accumulations are workgroup-private. Costs one
+     extra recomputation of `Si` and `dPi` per tile.
+  5. **Backward**: `dO` was never padded in its *sequence* dimension
+     (`Nq_pad_sz` is derived from Q's already-padded `n`, so it is always
+     0) yet is read with the padded Q's strides -- an out-of-bounds read,
+     and the wrong batch entirely for `b`/`h` > 0, at any `n` that is not
+     a multiple of `Br`.
+  6. **bf16**: `MAX_NUM` was `INFINITY`, so a fully-masked padded row
+     evaluated `exp2f(-inf - -inf)` = NaN and wrote NaN into `l_i`, `O`'s
+     padding and `L`; the backward reloads `L`, so `dK`/`dV` came back
+     all-NaN for any shape whose `n`/`n_kv` was not a multiple of
+     `Br`/`Bc`. Now a finite sentinel, matching the fp16 file. (Guarding
+     the NaN after the fact does not work under `-Ofast`/`-ffast-math`,
+     which imply `-ffinite-math-only`: an `l_i > 0.0f` guard was measured
+     being compiled away. The `is_finite_f32` helper added alongside tests
+     the exponent bits instead, for the guards that remain.)
+
+  Plus forward performance work: parallelising the fp16 softmax epilogue
+  across the workgroup, and a causal early-exit in the backward for tiles
+  entirely above the diagonal.
 - `FlashAttn.py` was **not** vendored verbatim. Its logic (the JIT
   `torch.utils.cpp_extension.load(...)` call, `FlashAttentionFunction`'s
   forward/backward `Br`/`Bc` selection) was reimplemented in

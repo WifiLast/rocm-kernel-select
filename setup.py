@@ -2,9 +2,10 @@ import glob
 import multiprocessing
 import os
 import shutil
+import subprocess
 import sys
 
-from setuptools import setup
+from setuptools import Command, setup
 from torch.utils.cpp_extension import BuildExtension, CUDAExtension
 
 
@@ -856,6 +857,80 @@ def _torch_build_suffix() -> str:
         return ""
 
 
+# ---------------------------------------------------------------------
+# THIRD-PARTY SUB-PACKAGE INSTALL. FlexGEMM and torchsparse specifically --
+# NOT CuMesh or nvdiffrast -- are built and `pip install`ed automatically
+# right after this package's own extension finishes, because
+# flexgemm_ops.py and torchsparse_ops.py are the two third_party adapters
+# actually wired into amd_tuned_torch's runtime op dispatch
+# (flexgemm_ops.maybe_sparse_conv{1,2,3}d inside _patched_conv2d/
+# _patched_conv3d, and the sparse conv1d fast path in miopen_fallback.py) --
+# a plain `pip install -e .` of this package leaving those switches always
+# falling through to dense would be a surprising default. cumesh_ops.py and
+# nvdiffrast_ops.py are plain opt-in library surfaces nothing else in this
+# package calls into on its own, so CuMesh/nvdiffrast stay manual installs
+# (see third_party/README.md) -- building either can take real time
+# (nvdiffrast in particular), and forcing that cost on every install of
+# this package for two dependencies nothing here actually needs would be
+# the wrong default in the other direction.
+#
+# Set AMD_TUNED_TORCH_INSTALL_THIRD_PARTY=0 to skip this entirely (e.g. CI
+# building just the core extension, or iterating on amd_tuned_torch itself
+# without wanting to pay for two more builds every time).
+_THIRD_PARTY_TO_INSTALL = ['FlexGEMM', 'torchsparse']
+_INSTALL_THIRD_PARTY = os.environ.get("AMD_TUNED_TORCH_INSTALL_THIRD_PARTY", "1") != "0"
+
+
+def _install_third_party_packages() -> None:
+    if not _INSTALL_THIRD_PARTY:
+        print("setup.py: third_party FlexGEMM/torchsparse install SKIPPED "
+              "(AMD_TUNED_TORCH_INSTALL_THIRD_PARTY=0)")
+        return
+    for name in _THIRD_PARTY_TO_INSTALL:
+        _install_third_party_package(name)
+
+
+def _install_third_party_package(name: str) -> None:
+    """Best-effort `pip install -e .` of third_party/<name>, run as a
+    subprocess (each has its own independent setup.py/build system, not
+    something this file's own CUDAExtension list can absorb).
+
+    NEVER fails the outer build. flexgemm_ops.py/torchsparse_ops.py
+    consume these at IMPORT time (available() reports False if missing),
+    not at this package's own link time -- unlike hipBLASLt/CK, a failed
+    or skipped sub-install here is not the kind of ABSENT-vs-DECLINED
+    error this file raises hard for at the top; it degrades exactly like
+    every other optional dependency in this package already does, just
+    reached via a subprocess instead of a missing #include.
+
+    BUILD_TARGET/GPU_ARCHS are propagated (via os.environ.setdefault, so
+    an explicit override in the parent environment always wins) as
+    rocm/GPU_ARCH -- this package only ever builds for ROCm, so the
+    sub-packages should default to the same target rather than each
+    re-running their own CUDA/ROCm auto-detection independently and
+    potentially disagreeing with this build or each other."""
+    path = os.path.join(_here, 'third_party', name)
+    if not os.path.isfile(os.path.join(path, 'setup.py')):
+        print(f"setup.py: third_party/{name}/setup.py not found -- skipping "
+              "(a stripped-down source tree, not necessarily a broken one)")
+        return
+    print(f"setup.py: building third_party/{name} ...")
+    env = dict(os.environ)
+    env.setdefault("BUILD_TARGET", "rocm")
+    env.setdefault("GPU_ARCHS", GPU_ARCH)
+    try:
+        subprocess.run(
+            [sys.executable, '-m', 'pip', 'install', '--no-build-isolation', '-e', '.'],
+            cwd=path, env=env, check=True)
+        print(f"setup.py: third_party/{name} installed")
+    except (subprocess.SubprocessError, OSError) as e:
+        print(f"setup.py: third_party/{name} build FAILED ({e}) -- the "
+              f"corresponding amd_tuned_torch adapter's available() will "
+              "report False until this is fixed. Retry manually with:\n"
+              f"    cd third_party/{name} && BUILD_TARGET=rocm "
+              f"GPU_ARCHS={GPU_ARCH} pip install --user -e .")
+
+
 class CachedBuildExtension(BuildExtension.with_options(use_ninja=True)):
     """BuildExtension with its object directory pinned. See BUILD CACHE above."""
 
@@ -873,6 +948,7 @@ class CachedBuildExtension(BuildExtension.with_options(use_ninja=True)):
         super().run()
         self._report_build_cost()
         self._deposit_keyed_build()
+        _install_third_party_packages()
 
     def _report_build_cost(self):
         """Print where the build time actually went, from ninja's own log.
@@ -1003,6 +1079,82 @@ else:
         "not possible -- these kernels are not an optional tier",
         optional=False)
 
+# ---------------------------------------------------------------------------
+# Vendored rocWMMA FlashAttention-2 kernel (amd_tuned_torch/_vendor/
+# rocwmma_fattn/, provenance in NOTICE.md there) -- built ahead of time.
+#
+# WHY BUILD IT HERE. flash_attn_rocwmma_ops.py can compile these same three
+# sources itself, at first use, via torch.utils.cpp_extension.load(). That
+# JIT path is not going away -- it stays the fallback, and it is what a
+# checkout with no build, or one built for a different torch, still gets --
+# but it makes the FIRST call to enable_flash_attn_rocwmma() pay a ~4 minute
+# hipcc compile (measured, gfx1100: two ~1000-line kernels at -Ofast through
+# rocWMMA's templates) inside whatever process happened to touch attention
+# first. Building here moves that cost to install time, where every other
+# kernel in this package already pays it, and lets the result land in
+# amd_tuned_torch/_native_builds/<torch key>/ like the other three
+# extensions -- so the two torch versions sharing this editable checkout get
+# one binary each instead of fighting over a single JIT build directory.
+#
+# THE nvcc FLAGS ARE NOT FREELY EDITABLE. They are the JIT path's
+# extra_cuda_cflags verbatim and have to stay in sync with it:
+#   -U__HIP_NO_HALF_CONVERSIONS__  is load-bearing. torch's
+#       COMMON_HIPCC_FLAGS unconditionally defines it, which deletes
+#       __half's constructor-from-float in <hip/hip_fp16.h>; rocWMMA's
+#       vector.hpp then registers hfloat16_t vector types through a
+#       static_cast<hfloat16_t>(0.0f), so including <rocwmma/rocwmma.hpp>
+#       under that define is a hard compile error. Same reasoning, same
+#       flag, as the core extension's codegen'd fp16 conv kernels below.
+#   -mcumode / -ffast-math / -fgpu-flush-denormals-to-zero  are what the
+#       kernel was tuned and numerically checked under
+#       (tools/bench_flash_attn_rocwmma.py); dropping them changes results,
+#       not just speed.
+# What is deliberately ABSENT is upstream's hand-forced ROCWMMA_ARCH_GFX1100
+# /ROCWMMA_ARCH_GFX11/ROCWMMA_WAVE32_MODE/ROCWMMA_BLOCK_DIM_16_SUPPORTED
+# macros: config.hpp derives those itself from __gfx1100__, which
+# --offload-arch defines on the device pass only, and forcing them applies
+# to the HOST pass too, where it trips rocWMMA's own gfx11 block-size
+# static_assert. See flash_attn_rocwmma_ops.py for the full account.
+#
+# Set AMD_TUNED_TORCH_FLASH_ATTN_WMMA=0 to skip this tier and leave the JIT
+# as the only path -- worth doing while iterating on the kernel sources
+# themselves, since the JIT rebuilds on edit and this does not.
+_fattn_dir = os.path.join('amd_tuned_torch', '_vendor', 'rocwmma_fattn')
+_fattn_sources = [os.path.join(_fattn_dir, f)
+                  for f in ('host.cpp', 'kernel_fp16.cu', 'kernel_bf16.cu')]
+_want_fattn = os.environ.get("AMD_TUNED_TORCH_FLASH_ATTN_WMMA", "1") != "0"
+_have_fattn = _want_fattn and all(
+    os.path.isfile(os.path.join(_here, f)) for f in _fattn_sources)
+if _want_fattn and not _have_fattn:
+    # Not fatal, unlike a missing rocWMMA header: the JIT fallback covers it,
+    # and the vendored tree being absent is what a stripped source
+    # distribution looks like rather than a broken environment.
+    print("setup.py: rocWMMA FlashAttention sources not found under "
+          f"{_fattn_dir}/ -- skipping the prebuilt tier; "
+          "flash_attn_rocwmma_ops.py will JIT-compile at first use")
+elif _have_fattn:
+    print("setup.py: rocWMMA FlashAttention prebuilt tier enabled "
+          f"(--offload-arch={GPU_ARCH})")
+
+_fattn_ext = [
+    CUDAExtension(
+        name='amd_tuned_torch._native_flash_attn_wmma',
+        sources=_fattn_sources,
+        include_dirs=_rocwmma_includes,
+        extra_compile_args={
+            'cxx': ['-O3'],
+            'nvcc': [
+                '-Ofast',
+                f'--offload-arch={GPU_ARCH}',
+                '-U__HIP_NO_HALF_CONVERSIONS__',
+                '-mcumode',
+                '-ffast-math',
+                '-fgpu-flush-denormals-to-zero',
+            ],
+        },
+    ),
+] if _have_fattn else []
+
 _generated_conv2d_fp16 = sorted(glob.glob('src/cuda/generated/conv2d_fp16_*.cu'))
 _generated_conv3d_fp16 = sorted(glob.glob('src/cuda/generated/conv3d_fp16_*.cu'))
 if not _generated_conv2d_fp16 or not _generated_conv3d_fp16:
@@ -1010,6 +1162,108 @@ if not _generated_conv2d_fp16 or not _generated_conv3d_fp16:
         "src/cuda/generated/conv{2,3}d_fp16_*.cu not found -- generate them "
         "first with: python tools/kernelgen/generate.py"
     )
+
+# ---------------------------------------------------------------------------
+# `python setup.py benchmark_sparse_conv` -- wires tools/benchmark_sparse_conv.py
+# (see that file's own docstring for what it measures and why) into the
+# standard setup.py command surface, alongside build_ext, rather than
+# leaving it a tools/-only invocation nothing else in this file references.
+# The script itself stays under tools/, same as every other benchmark
+# script in this project (bench.py, bench_ck.py, bench_conv2d_fp16.py,
+# autotune_conv.py) -- none of those are part of the installed package
+# either, since they're development/calibration tools run from a checkout,
+# not something an end user's `pip install` needs to ship. This command
+# does not run automatically as part of build/install: benchmarking needs
+# a real GPU and takes real wall-clock time (a sweep per dimensionality),
+# neither of which belongs on the critical path of an ordinary build.
+#
+# Usage:
+#   python setup.py benchmark_sparse_conv
+#   python setup.py benchmark_sparse_conv --reset
+#   python setup.py benchmark_sparse_conv --dims conv2d,conv3d --occupancy 0.1
+class BenchmarkSparseConv(Command):
+    description = (
+        "Benchmark flexgemm_ops sparse conv1d/2d/3d against dense F.convNd "
+        "and save the measured crossover size to "
+        "amd_tuned_torch/_sparse_conv_calibration/ (see "
+        "amd_tuned_torch/sparse_conv_calibration.py)."
+    )
+    user_options = [
+        ('reset', None,
+         "Delete this GPU's saved calibration and exit without measuring."),
+        ('dims=', None,
+         'Comma-separated dims to benchmark: conv1d,conv2d,conv3d (default: all three).'),
+        ('sweep=', None,
+         'Which crossover(s) to measure: both, size, or occupancy (default: both).'),
+        ('pattern=', None,
+         'Spatial pattern for synthetic occupied positions: clustered or '
+         'uniform (default: clustered).'),
+        ('occupancy=', None,
+         'Fixed, favorable occupancy the SIZE sweep sweeps size at (default 0.05).'),
+        ('sizes=', None,
+         'Comma-separated spatial-position sizes to sweep (default: the '
+         "script's own power-of-2 range)."),
+        ('occupancy-sweep-size=', None,
+         'Fixed spatial size the OCCUPANCY sweep sweeps occupancy at (default 65536).'),
+        ('occupancies=', None,
+         'Comma-separated occupancies to sweep, ascending (default: the '
+         "script's own range)."),
+    ]
+    boolean_options = ['reset']
+
+    def initialize_options(self):
+        self.reset = False
+        self.dims = None
+        self.sweep = None
+        self.pattern = None
+        self.occupancy = None
+        self.sizes = None
+        self.occupancy_sweep_size = None
+        self.occupancies = None
+
+    def finalize_options(self):
+        pass  # nothing to validate -- tools/benchmark_sparse_conv.py's own
+              # argparse rejects a malformed numeric/choice value.
+
+    def run(self):
+        sys.path.insert(0, os.path.join(_here, 'tools'))
+        try:
+            import benchmark_sparse_conv
+        finally:
+            sys.path.pop(0)
+
+        argv = ['benchmark_sparse_conv.py']
+        if self.reset:
+            argv.append('--reset')
+        if self.dims:
+            argv += ['--dims'] + self.dims.split(',')
+        if self.sweep:
+            argv += ['--sweep', self.sweep]
+        if self.pattern:
+            argv += ['--pattern', self.pattern]
+        if self.occupancy:
+            argv += ['--occupancy', str(self.occupancy)]
+        if self.sizes:
+            argv += ['--sizes'] + self.sizes.split(',')
+        if self.occupancy_sweep_size:
+            argv += ['--occupancy-sweep-size', str(self.occupancy_sweep_size)]
+        if self.occupancies:
+            argv += ['--occupancies'] + self.occupancies.split(',')
+
+        # argparse (inside benchmark_sparse_conv.main()) reads sys.argv[1:]
+        # directly -- there is no other entry point to hand these to, so
+        # this swaps it in for the duration of the call the same way
+        # tools/bench_conv2d_fp16.py-style scripts are normally invoked
+        # from an actual shell command line.
+        old_argv = sys.argv
+        sys.argv = argv
+        try:
+            exit_code = benchmark_sparse_conv.main()
+        finally:
+            sys.argv = old_argv
+        if exit_code:
+            raise SystemExit(exit_code)
+
 
 setup(
     name='amd_tuned_torch',
@@ -1079,6 +1333,14 @@ setup(
                 'src/cuda/conv2d_fp32.cu',
                 'src/cuda/conv3d_fp32.cu',
                 'src/cuda/conv3d_fp32_winograd.cu',
+                # Experimental gfx1100 WMMA int4/int8 GEMM -- ported from
+                # trellis2-convrot-rocm's MIT-licensed probe, see
+                # amd_tuned_torch/_vendor/gfx1100_iu4_gemm/NOTICE.md. Always
+                # built (no external dependency beyond hipcc, same as
+                # group_norm/conv above) but gated at runtime to gfx1100 by
+                # iu4_gemm_supported() and never wired into kernel_select --
+                # see amd_tuned_torch/iu4_gemm_ops.py.
+                'src/cuda/iu4_gemm_fwd.cu',
                 'src/main_rocm.cpp',
             ] + _generated_conv2d_fp16 + _generated_conv3d_fp16,
             include_dirs=_rocwmma_includes,
@@ -1149,8 +1411,31 @@ setup(
                 'cxx': ['-O3'] + _hipblaslt_defines,
             },
         ),
-    ],
+        # Vendored depthwise conv1d (amd_tuned_torch/_vendor/
+        # flashfftconv_depthwise_conv1d/, see that directory's NOTICE.md) --
+        # always built, independent of third_party/FlashFFTConv/ entirely:
+        # no WMMA/rocWMMA usage, no dependency on that package's
+        # monarch_cuda extension, plain hipify-friendly CUDA like
+        # ck_conv_fwd.cu etc., hence its own small extension here rather
+        # than folding into _native or requiring FlashFFTConv to be
+        # installed first.
+        CUDAExtension(
+            name='amd_tuned_torch._native_depthwise_conv1d',
+            sources=[
+                'amd_tuned_torch/_vendor/flashfftconv_depthwise_conv1d/host.cpp',
+                'amd_tuned_torch/_vendor/flashfftconv_depthwise_conv1d/conv1d_bhl.cu',
+                'amd_tuned_torch/_vendor/flashfftconv_depthwise_conv1d/conv1d_blh.cu',
+                'amd_tuned_torch/_vendor/flashfftconv_depthwise_conv1d/conv1d_bwd_cuda_bhl.cu',
+                'amd_tuned_torch/_vendor/flashfftconv_depthwise_conv1d/conv1d_bwd_cuda_blh.cu',
+            ],
+            extra_compile_args={
+                'cxx': ['-O3'],
+                'nvcc': ['-O3', f'--offload-arch={GPU_ARCH}', '-U__HIP_NO_HALF_CONVERSIONS__'],
+            },
+        ),
+    ] + _fattn_ext,
     cmdclass={
-        'build_ext': CachedBuildExtension
+        'build_ext': CachedBuildExtension,
+        'benchmark_sparse_conv': BenchmarkSparseConv,
     }
 )

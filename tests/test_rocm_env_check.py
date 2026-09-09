@@ -242,6 +242,32 @@ class TestRocmProfilerAttached:
         assert not rule.predicate(_env(), _tiers(autopatch=True))
 
 
+class TestSparseConvCalibrationResetLeftOn:
+    def test_triggers_when_set(self):
+        rule = _rule("sparse_conv_calibration_reset_left_on")
+        assert rule.predicate(
+            _env(AMD_TUNED_TORCH_SPARSE_CONV_CALIBRATION_RESET="1"), _tiers())
+
+    def test_not_triggered_when_unset(self):
+        rule = _rule("sparse_conv_calibration_reset_left_on")
+        assert not rule.predicate(_env(), _tiers())
+
+    def test_not_triggered_when_explicitly_zero(self):
+        rule = _rule("sparse_conv_calibration_reset_left_on")
+        assert not rule.predicate(
+            _env(AMD_TUNED_TORCH_SPARSE_CONV_CALIBRATION_RESET="0"), _tiers())
+
+    def test_does_not_depend_on_autopatch(self):
+        """Unlike most rules here, this one is about
+        sparse_conv_calibration.load() (consulted by flexgemm_ops at import
+        time, independent of whether amd_tuned_torch.enable() has patched
+        anything), so it must trigger the same way regardless of tiers.autopatch."""
+        rule = _rule("sparse_conv_calibration_reset_left_on")
+        env = _env(AMD_TUNED_TORCH_SPARSE_CONV_CALIBRATION_RESET="1")
+        assert rule.predicate(env, _tiers(autopatch=True))
+        assert rule.predicate(env, _tiers(autopatch=False))
+
+
 class TestIsWritableDir:
     def test_existing_writable_dir(self, tmp_path):
         assert rec._is_writable_dir(str(tmp_path)) is True

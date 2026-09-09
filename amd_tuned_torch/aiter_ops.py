@@ -273,6 +273,35 @@ def _quantize_activation(x: torch.Tensor):
     return q, scale
 
 
+# Resolved once at import, same posture as
+# amd_tuned_torch.__init__._HAS_INFERENCE_MODE.
+_HAS_IS_INFERENCE = hasattr(torch, "is_inference")
+
+
+def _tensor_version(tensor: torch.Tensor) -> Optional[int]:
+    """torch's in-place-mutation counter for `tensor`, or None when it has
+    none -- a tensor created inside `torch.inference_mode()` tracks no
+    version and raises `RuntimeError: Inference tensors do not track
+    version counter.` on `._version`. Same guard, and the same reasoning,
+    as amd_tuned_torch.flexgemm_ops._tensor_version (whose docstring has
+    the full story, including the real crash that motivated it): a cache
+    key detail must not be able to take the op down, and a tensor with no
+    version counter is uncacheable rather than unusable, since identity
+    alone can't notice a later in-place rewrite (exactly the LoRA
+    `.copy_()` case this cache's version check exists for).
+
+    Weights normally aren't inference tensors even under inference_mode
+    (they were created before it), but one produced INSIDE the block --
+    a `.half()`/`.to()` cast of a weight, say, which is ordinary in an
+    inference wrapper -- is."""
+    if _HAS_IS_INFERENCE and torch.is_inference(tensor):
+        return None
+    try:
+        return tensor._version
+    except RuntimeError:
+        return None
+
+
 def _quantize_weight(weight: torch.Tensor):
     """Per-output-channel symmetric int8 quantization, cached. weight:
     (N, K) -> (int8 (N, K), fp32 scale (1, N)) -- transposed relative to
@@ -289,8 +318,9 @@ def _quantize_weight(weight: torch.Tensor):
     replaced weight tensor) doesn't cover a weight mutated in place (e.g. a
     LoRA swap via `.copy_()`, same object, new values).
     """
+    version = _tensor_version(weight)
     cached = _weight_cache.get(weight)
-    if cached is not None and cached[0] == weight._version:
+    if cached is not None and version is not None and cached[0] == version:
         return cached[1], cached[2]
     w = weight.float()
     smooth_scale = _smooth_scale_cache.get(weight)
@@ -300,7 +330,8 @@ def _quantize_weight(weight: torch.Tensor):
     row_scale = amax / _INT8_MAX  # (N, 1)
     q = (w / row_scale).round().clamp(-_INT8_MAX, _INT8_MAX).to(torch.int8)
     scale = row_scale.t().contiguous()  # (1, N)
-    _weight_cache[weight] = (weight._version, q, scale)
+    if version is not None:  # uncacheable -- see _tensor_version
+        _weight_cache[weight] = (version, q, scale)
     return q, scale
 
 

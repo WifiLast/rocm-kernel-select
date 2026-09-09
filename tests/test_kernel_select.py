@@ -11,6 +11,7 @@ of breaking the call, and the env kill-switch works.
 """
 from __future__ import annotations
 
+import json
 import warnings
 
 import pytest
@@ -301,3 +302,112 @@ class TestCorrectnessVerification:
         timings({"fast": 1.0, "stock": 5.0})
         out = kernel_select.pick_key("linear", ("k5",), candidates)
         assert out is wrong  # old behaviour: fastest wins unconditionally
+
+
+class TestMagnitudeRelativeVerification:
+    """_verify's tolerance is relative to the reference output's own RMS,
+    not absolute. A fixed atol rejected three correct, faster kernels on
+    gfx1100 -- always on a handful of near-zero elements out of millions
+    (see _verify's docstring for the measurements) -- and because a
+    rejection is a permanent per-shape blacklist, each one permanently
+    lost the speedup: 1.8x for CK conv3d fp16, 157x for FFT conv3d fp32,
+    2.24x for CK conv2d fp16 on a real downsampling conv."""
+
+    def test_near_zero_elements_of_a_large_output_pass(self):
+        """The shape of all three real failures: a big output, agreement
+        that is excellent relative to its magnitude, and a few near-zero
+        elements whose absolute error exceeds a fixed atol."""
+        # fp16, as measured: CK conv2d on 2x640x128x64->640 k3 stride2,
+        # output RMS 75.4, worst disagreement 0.375 on a near-zero element.
+        ref = (torch.randn(4096) * 75.0).half()
+        ref[0] = 0.06
+        cand = ref.clone()
+        cand[0] += 0.375
+        rtol, atol = kernel_select._TOLERANCES[torch.float16]
+        assert not torch.allclose(cand.float(), ref.float(), rtol=rtol, atol=atol)  # old bar
+        assert kernel_select._verify(cand, ref)                                     # new bar
+
+    def test_the_relative_bar_tracks_the_dtype_it_was_calibrated_for(self):
+        """fp32's rtol is 100x tighter than fp16's, so the same absolute
+        disagreement that is fine for an fp16 accumulation is not fine for
+        an fp32 one -- the scaling must not flatten that distinction."""
+        ref = (torch.randn(4096) * 75.0)
+        cand = ref.clone()
+        cand[0] += 0.375
+        assert not kernel_select._verify(cand, ref)                  # fp32: rejected
+        assert kernel_select._verify(cand.half(), ref.half())        # fp16: accepted
+
+    def test_a_wrong_candidate_is_still_rejected(self):
+        ref = torch.randn(4096) * 75.0
+        assert not kernel_select._verify(torch.zeros_like(ref), ref)
+        assert not kernel_select._verify(ref * 1.5, ref)
+
+    def test_a_subtly_wrong_candidate_is_still_rejected(self):
+        """Order RMS/sqrt(C) -- a dropped channel's worth of error -- must
+        stay well above the scaled bar, or the bar is useless."""
+        ref = (torch.randn(64, 64) * 75.0)
+        cand = ref.clone()
+        cand[:, 0] = 0.0                    # one channel of 64 dropped
+        assert not kernel_select._verify(cand, ref)
+
+    def test_scale_floor_is_never_below_the_fixed_tolerance(self):
+        """An all-but-zero output gives a tiny RMS; the fixed atol is a
+        floor, so the bar can't collapse to zero and start rejecting
+        ordinary rounding."""
+        ref = torch.zeros(4096)
+        cand = torch.zeros(4096)
+        cand[0] = 5e-3                      # under fp32's atol floor of 1e-5? no
+        assert kernel_select._reference_scale(ref) is None
+        assert not kernel_select._verify(cand, ref)
+        cand[0] = 1e-6
+        assert kernel_select._verify(cand, ref)
+
+    def test_reference_scale_samples_without_upcasting_everything(self):
+        x = torch.full((4096,), 3.0)
+        assert abs(kernel_select._reference_scale(x) - 3.0) < 1e-5
+        assert kernel_select._reference_scale(torch.zeros(8)) is None
+        assert kernel_select._reference_scale("not a tensor") is None
+
+
+class TestVerifyBarVersioning:
+    """A blacklist written under a superseded bar is a stale judgement, not
+    evidence: it must not outlive the bar change, and the winner it caused
+    must be re-contested rather than served from cache forever."""
+
+    def test_stale_blacklist_and_its_winner_are_dropped_on_load(self, tmp_path, monkeypatch):
+        key = ("conv2d", "shape-a")
+        encoded = json.dumps([kernel_select._encode(x) for x in key])
+        other = ("conv2d", "shape-b")
+        encoded_other = json.dumps([kernel_select._encode(x) for x in other])
+        path = tmp_path / "cache.json"
+        path.write_text(json.dumps({
+            "verify_bar": kernel_select._VERIFY_BAR_VERSION - 1,
+            "winners": {encoded: "stock", encoded_other: "ck"},
+            "bad": {encoded: ["ck"]},
+        }))
+        monkeypatch.setattr(kernel_select, "_cache_path", lambda: str(path))
+        kernel_select._winners.clear()
+        kernel_select._bad_candidates.clear()
+        kernel_select._load_disk_cache()
+        assert kernel_select._bad_candidates == {}          # judgement dropped
+        assert key not in kernel_select._winners            # so is its winner
+        assert kernel_select._winners.get(other) == "ck"    # untouched
+        kernel_select._winners.clear()
+
+    def test_current_bar_keeps_the_blacklist(self, tmp_path, monkeypatch):
+        key = ("conv2d", "shape-c")
+        encoded = json.dumps([kernel_select._encode(x) for x in key])
+        path = tmp_path / "cache.json"
+        path.write_text(json.dumps({
+            "verify_bar": kernel_select._VERIFY_BAR_VERSION,
+            "winners": {encoded: "stock"},
+            "bad": {encoded: ["ck"]},
+        }))
+        monkeypatch.setattr(kernel_select, "_cache_path", lambda: str(path))
+        kernel_select._winners.clear()
+        kernel_select._bad_candidates.clear()
+        kernel_select._load_disk_cache()
+        assert kernel_select._bad_candidates.get(key) == {"ck"}
+        assert kernel_select._winners.get(key) == "stock"
+        kernel_select._winners.clear()
+        kernel_select._bad_candidates.clear()

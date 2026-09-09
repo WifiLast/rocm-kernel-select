@@ -506,6 +506,71 @@ class TestPatchedConv2d:
         assert torch.equal(out, F.conv2d(x, w, padding=1))
 
 
+class TestPatchedConv2dSparseSwitch:
+    """The on-the-fly flex_gemm.sparse_conv2d switch checked before the
+    native/aiter/stock contest above -- see
+    flexgemm_ops.maybe_sparse_conv2d's docstring. Stubs the adapter
+    module's function directly, same pattern as
+    TestPatchedConv3dSparseSwitch."""
+
+    def test_uses_sparse_result_when_returned(self, monkeypatch, native):
+        force_eligible(monkeypatch)
+        x = torch.randn(2, 4, 8, 8)
+        w = torch.randn(4, 4, 3, 3)
+        sparse_result = torch.zeros(2, 4, 8, 8)
+        monkeypatch.setattr(amd_tuned_torch.flexgemm_ops, "sparse_conv2d_enabled", lambda: True)
+        monkeypatch.setattr(amd_tuned_torch.flexgemm_ops, "maybe_sparse_conv2d",
+                             MagicMock(return_value=sparse_result))
+
+        out = amd_tuned_torch._patched_conv2d(x, w, padding=1)
+
+        assert out is sparse_result
+        native.conv2d.assert_not_called()
+
+    def test_falls_through_to_dense_contest_when_sparse_declines(self, monkeypatch, native):
+        force_eligible(monkeypatch)
+        x = torch.randn(2, 4, 8, 8)
+        w = torch.randn(4, 4, 3, 3)
+        native.conv2d.return_value = torch.zeros(2, 4, 8, 8)
+        monkeypatch.setattr(amd_tuned_torch.flexgemm_ops, "sparse_conv2d_enabled", lambda: True)
+        monkeypatch.setattr(amd_tuned_torch.flexgemm_ops, "maybe_sparse_conv2d",
+                             MagicMock(return_value=None))
+
+        out = amd_tuned_torch._patched_conv2d(x, w, padding=1)
+
+        assert out is native.conv2d.return_value
+
+    def test_skips_the_check_entirely_when_disabled(self, monkeypatch, native):
+        force_eligible(monkeypatch)
+        x = torch.randn(2, 4, 8, 8)
+        w = torch.randn(4, 4, 3, 3)
+        native.conv2d.return_value = torch.zeros(2, 4, 8, 8)
+        monkeypatch.setattr(amd_tuned_torch.flexgemm_ops, "sparse_conv2d_enabled", lambda: False)
+        fake_maybe = MagicMock(return_value="should never be used")
+        monkeypatch.setattr(amd_tuned_torch.flexgemm_ops, "maybe_sparse_conv2d", fake_maybe)
+
+        out = amd_tuned_torch._patched_conv2d(x, w, padding=1)
+
+        assert out is native.conv2d.return_value
+        fake_maybe.assert_not_called()
+
+    def test_pointwise_conv_skips_sparse_check_too(self, monkeypatch, native):
+        """1x1/stride1/pad0/dilation1 short-circuits to stock before the
+        sparse check even runs (see _is_pointwise_conv2d) -- verify the
+        sparse switch doesn't get a chance to fire for this shape either."""
+        force_eligible(monkeypatch)
+        x = torch.randn(2, 4, 8, 8)
+        w = torch.randn(4, 4, 1, 1)
+        monkeypatch.setattr(amd_tuned_torch.flexgemm_ops, "sparse_conv2d_enabled", lambda: True)
+        fake_maybe = MagicMock(return_value="should never be used")
+        monkeypatch.setattr(amd_tuned_torch.flexgemm_ops, "maybe_sparse_conv2d", fake_maybe)
+
+        out = amd_tuned_torch._patched_conv2d(x, w)
+
+        assert torch.equal(out, F.conv2d(x, w))
+        fake_maybe.assert_not_called()
+
+
 class TestPatchedConv3d:
     """Native HIP kernel only (fp16/fp32) -> stock -- neither aiter nor TE
     cover conv3d at all, so there's no second tier."""
@@ -541,6 +606,57 @@ class TestPatchedConv3d:
         w = torch.randn(4, 4, 3, 3, 3)
         out = amd_tuned_torch._patched_conv3d(x, w, padding=1)
         assert torch.equal(out, F.conv3d(x, w, padding=1))
+
+
+class TestPatchedConv3dSparseSwitch:
+    """The on-the-fly flex_gemm.sparse_conv3d switch checked before the
+    native/CK/stock contest above -- see flexgemm_ops.maybe_sparse_conv3d's
+    docstring for the occupancy-based design. Both flexgemm_ops.available()
+    and AMD_TUNED_TORCH_SPARSE_CONV3D are irrelevant here: this class stubs
+    maybe_sparse_conv3d directly, the same "stub the adapter module's
+    function, not its underlying dependency" pattern the `aiter`/`te`
+    fixtures use."""
+
+    def test_uses_sparse_result_when_returned(self, monkeypatch, native):
+        force_eligible(monkeypatch)
+        x = torch.randn(2, 4, 3, 8, 8)
+        w = torch.randn(4, 4, 3, 3, 3)
+        sparse_result = torch.zeros(2, 4, 3, 8, 8)
+        monkeypatch.setattr(amd_tuned_torch.flexgemm_ops, "sparse_conv3d_enabled", lambda: True)
+        monkeypatch.setattr(amd_tuned_torch.flexgemm_ops, "maybe_sparse_conv3d",
+                             MagicMock(return_value=sparse_result))
+
+        out = amd_tuned_torch._patched_conv3d(x, w, padding=1)
+
+        assert out is sparse_result
+        native.conv3d.assert_not_called()  # never reached the dense contest at all
+
+    def test_falls_through_to_dense_contest_when_sparse_declines(self, monkeypatch, native):
+        force_eligible(monkeypatch)
+        x = torch.randn(2, 4, 3, 8, 8)
+        w = torch.randn(4, 4, 3, 3, 3)
+        native.conv3d.return_value = torch.zeros(2, 4, 3, 8, 8)
+        monkeypatch.setattr(amd_tuned_torch.flexgemm_ops, "sparse_conv3d_enabled", lambda: True)
+        monkeypatch.setattr(amd_tuned_torch.flexgemm_ops, "maybe_sparse_conv3d",
+                             MagicMock(return_value=None))
+
+        out = amd_tuned_torch._patched_conv3d(x, w, padding=1)
+
+        assert out is native.conv3d.return_value
+
+    def test_skips_the_check_entirely_when_disabled(self, monkeypatch, native):
+        force_eligible(monkeypatch)
+        x = torch.randn(2, 4, 3, 8, 8)
+        w = torch.randn(4, 4, 3, 3, 3)
+        native.conv3d.return_value = torch.zeros(2, 4, 3, 8, 8)
+        monkeypatch.setattr(amd_tuned_torch.flexgemm_ops, "sparse_conv3d_enabled", lambda: False)
+        fake_maybe = MagicMock(return_value="should never be used")
+        monkeypatch.setattr(amd_tuned_torch.flexgemm_ops, "maybe_sparse_conv3d", fake_maybe)
+
+        out = amd_tuned_torch._patched_conv3d(x, w, padding=1)
+
+        assert out is native.conv3d.return_value
+        fake_maybe.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
@@ -703,32 +819,37 @@ class TestConv3dWinogradFp16Dispatch:
 
 
 class TestIsFlashAttnRocwmmaEligible:
-    def _qk(self, B=1, H=4, Nq=8, Nk=8, D=32, dtype=torch.float16):
+    def _qk(self, B=1, H=4, Nq=8, Nk=8, D=32, dtype=torch.float16, Hkv=None):
+        """Hkv defaults to H (plain MHA). Setting it lower gives the GQA/MQA
+        layout the vendored kernel cannot handle."""
+        Hkv = H if Hkv is None else Hkv
         q = torch.randn(B, H, Nq, D, dtype=dtype)
-        k = torch.randn(B, H, Nk, D, dtype=dtype)
-        return q, k
+        k = torch.randn(B, Hkv, Nk, D, dtype=dtype)
+        v = torch.randn(B, Hkv, Nk, D, dtype=dtype)
+        return q, k, v
 
     def test_eligible_shape_passes(self, monkeypatch):
         force_eligible(monkeypatch)
-        q, k = self._qk()
-        assert amd_tuned_torch._is_flash_attn_rocwmma_eligible(q, k, None, 0.0, False)
+        q, k, v = self._qk()
+        assert amd_tuned_torch._is_flash_attn_rocwmma_eligible(q, k, v, None, 0.0, False)
 
     def test_attn_mask_given_ineligible(self, monkeypatch):
         force_eligible(monkeypatch)
-        q, k = self._qk()
+        q, k, v = self._qk()
         mask = torch.ones(1, 1, 8, 8, dtype=torch.bool)
-        assert not amd_tuned_torch._is_flash_attn_rocwmma_eligible(q, k, mask, 0.0, False)
+        assert not amd_tuned_torch._is_flash_attn_rocwmma_eligible(q, k, v, mask, 0.0, False)
 
     def test_dropout_ineligible(self, monkeypatch):
         force_eligible(monkeypatch)
-        q, k = self._qk()
-        assert not amd_tuned_torch._is_flash_attn_rocwmma_eligible(q, k, None, 0.1, False)
+        q, k, v = self._qk()
+        assert not amd_tuned_torch._is_flash_attn_rocwmma_eligible(q, k, v, None, 0.1, False)
 
     def test_non_4d_ineligible(self, monkeypatch):
         force_eligible(monkeypatch)
         q = torch.randn(4, 8, 32)
         k = torch.randn(4, 8, 32)
-        assert not amd_tuned_torch._is_flash_attn_rocwmma_eligible(q, k, None, 0.0, False)
+        v = torch.randn(4, 8, 32)
+        assert not amd_tuned_torch._is_flash_attn_rocwmma_eligible(q, k, v, None, 0.0, False)
 
     def test_causal_with_mismatched_seqlen_ineligible(self, monkeypatch):
         """The vendored kernel's causal masking is plain top-left (no
@@ -737,20 +858,62 @@ class TestIsFlashAttnRocwmmaEligible:
         is_causal must decline otherwise rather than compute the wrong
         mask silently."""
         force_eligible(monkeypatch)
-        q, k = self._qk(Nq=4, Nk=8)
-        assert not amd_tuned_torch._is_flash_attn_rocwmma_eligible(q, k, None, 0.0, True)
+        q, k, v = self._qk(Nq=4, Nk=8)
+        assert not amd_tuned_torch._is_flash_attn_rocwmma_eligible(q, k, v, None, 0.0, True)
 
     def test_causal_with_matched_seqlen_eligible(self, monkeypatch):
         force_eligible(monkeypatch)
-        q, k = self._qk(Nq=8, Nk=8)
-        assert amd_tuned_torch._is_flash_attn_rocwmma_eligible(q, k, None, 0.0, True)
+        q, k, v = self._qk(Nq=8, Nk=8)
+        assert amd_tuned_torch._is_flash_attn_rocwmma_eligible(q, k, v, None, 0.0, True)
+
+    def test_gqa_ineligible(self, monkeypatch):
+        """REGRESSION: fewer K/V heads than Q heads must be declined.
+
+        The vendored kernel has no MQA/GQA support -- host.cpp's
+        fwd_parm/bwd_parm carry one head count and the kernel indexes K/V
+        by the QUERY head index, so a GQA layout reads past the end of K
+        and V. On gfx1100 that returns non-finite values and intermittently
+        traps as "HIP error: an illegal memory access was encountered",
+        poisoning the HIP context for the whole process.
+
+        This has to be caught in eligibility rather than in ranking:
+        kernel_select's contest calls every candidate in order to time it,
+        so a shape that merely *loses* still gets executed once.
+        """
+        force_eligible(monkeypatch)
+        q, k, v = self._qk(H=8, Hkv=2)
+        assert not amd_tuned_torch._is_flash_attn_rocwmma_eligible(
+            q, k, v, None, 0.0, False)
+        assert not amd_tuned_torch._is_flash_attn_rocwmma_eligible(
+            q, k, v, None, 0.0, True)
+
+    def test_mqa_ineligible(self, monkeypatch):
+        """Single-KV-head MQA is the same bug at its extreme."""
+        force_eligible(monkeypatch)
+        q, k, v = self._qk(H=8, Hkv=1)
+        assert not amd_tuned_torch._is_flash_attn_rocwmma_eligible(
+            q, k, v, None, 0.0, False)
+
+    def test_mismatched_head_dim_ineligible(self, monkeypatch):
+        force_eligible(monkeypatch)
+        q, k, v = self._qk(D=64)
+        v = torch.randn(v.shape[0], v.shape[1], v.shape[2], 32, dtype=v.dtype)
+        assert not amd_tuned_torch._is_flash_attn_rocwmma_eligible(
+            q, k, v, None, 0.0, False)
+
+    def test_kv_seqlen_disagreement_ineligible(self, monkeypatch):
+        force_eligible(monkeypatch)
+        q, k, v = self._qk(Nq=8, Nk=8)
+        v = torch.randn(v.shape[0], v.shape[1], 16, v.shape[3], dtype=v.dtype)
+        assert not amd_tuned_torch._is_flash_attn_rocwmma_eligible(
+            q, k, v, None, 0.0, False)
 
     def test_non_causal_with_mismatched_seqlen_still_eligible(self, monkeypatch):
         # non-causal doesn't care about seqlen matching at all -- only
         # is_causal triggers the top-left-vs-bottom-right ambiguity.
         force_eligible(monkeypatch)
-        q, k = self._qk(Nq=4, Nk=8)
-        assert amd_tuned_torch._is_flash_attn_rocwmma_eligible(q, k, None, 0.0, False)
+        q, k, v = self._qk(Nq=4, Nk=8)
+        assert amd_tuned_torch._is_flash_attn_rocwmma_eligible(q, k, v, None, 0.0, False)
 
 
 class TestFlashAttnRocwmmaDispatch:
@@ -1405,3 +1568,268 @@ class TestPatchedLinearInt8:
         w = torch.randn(3, 4)
         out = amd_tuned_torch._patched_linear_int8(x, w, None)
         assert out is fallback.return_value
+
+
+class TestFftconvConvTier:
+    """_patched_conv2d/_patched_conv3d contest FFT-conv
+    (amd_tuned_torch.fftconv_ops) as an extra candidate, but only for
+    kernels at/above a measured per-ndim width -- see
+    amd_tuned_torch._fftconv_conv_candidate's docstring for the gfx1100
+    crossover measurements behind those thresholds.
+
+    Same setup as TestFlashAttnRocwmmaKernelSelectContest: conftest forces
+    AMD_TUNED_TORCH_MEASURE_KERNELS=0 for the rest of the suite, so the
+    contest is re-enabled here explicitly, kernel_select._time is stubbed
+    (real timing would need a GPU and would assert a benchmark, not a
+    behaviour), and verification is off because these candidates return
+    bare sentinels rather than numerically equal outputs. What the FFT
+    tier's verification tolerance has to be is a separate question, tested
+    against real numbers in test_fftconv_ops.py."""
+
+    def setup_method(self):
+        # _patched_conv2d/_patched_conv3d resolve their stock callable
+        # through _ORIGINALS, which only exists while the patches are
+        # installed: calling them directly with enable() never having run
+        # raises KeyError (see test_composes_on_top_of_main_patched_conv3d's
+        # docstring for the same hazard). Whether some earlier test in this
+        # file happens to have left them installed is not something to
+        # rely on, so install them here and undo it LIFO below.
+        self._was_enabled = amd_tuned_torch.is_enabled()
+        if not self._was_enabled:
+            amd_tuned_torch.enable()
+        amd_tuned_torch.kernel_select._ENABLED = True
+        amd_tuned_torch.kernel_select._VERIFY_ENABLED = False
+        amd_tuned_torch.kernel_select.reset()
+
+    def teardown_method(self):
+        amd_tuned_torch.kernel_select.reset()
+        amd_tuned_torch.kernel_select._VERIFY_ENABLED = True
+        amd_tuned_torch.kernel_select._ENABLED = False
+        if not self._was_enabled:
+            amd_tuned_torch.disable()
+
+    @staticmethod
+    def _stock_conv2d(*args, **kwargs):
+        """Stock F.conv2d -- F.conv2d itself is patched inside these
+        tests, so a reference value has to come from _ORIGINALS."""
+        return amd_tuned_torch._ORIGINALS[(F, "conv2d")](*args, **kwargs)
+
+    @staticmethod
+    def _fake_time(rank):
+        """kernel_select._time stub. `rank` maps a candidate's output to a
+        time; like the real _time (see its docstring) a candidate that
+        declines (None) or raises loses the contest rather than
+        propagating, which is what the OOM path below relies on."""
+        def fake_time(fn):
+            try:
+                out = fn()
+            except (RuntimeError, TypeError, AssertionError):
+                return None
+            return None if out is None else rank(out)
+        return fake_time
+
+    @classmethod
+    def _prefer(cls, sentinel):
+        """_time stub making `sentinel`'s candidate the fastest."""
+        return cls._fake_time(lambda out: 1.0 if out is sentinel else 2.0)
+
+    def test_small_kernel_never_contests_fftconv(self, monkeypatch, native):
+        """A 3x3 conv is exactly what the other tiers exist for: the FFT
+        candidate must not even be built, let alone timed."""
+        force_eligible(monkeypatch)
+        fft = MagicMock(return_value=torch.zeros(2, 4, 8, 8))
+        monkeypatch.setattr(amd_tuned_torch.fftconv_ops, "fft_conv2d", fft)
+        native.conv2d.return_value = torch.zeros(2, 4, 8, 8)
+        monkeypatch.setattr(amd_tuned_torch.kernel_select, "_time",
+                            self._fake_time(lambda out: 1.0))
+        amd_tuned_torch._patched_conv2d(torch.randn(2, 4, 8, 8), torch.randn(4, 4, 3, 3),
+                                        padding=1)
+        fft.assert_not_called()
+
+    def test_large_kernel_wins_conv2d(self, monkeypatch, native):
+        force_eligible(monkeypatch)
+        k = amd_tuned_torch._FFTCONV_CONV2D_MIN_KERNEL
+        fft_out = torch.zeros(1, 2, 8, 8)
+        fft = MagicMock(return_value=fft_out)
+        monkeypatch.setattr(amd_tuned_torch.fftconv_ops, "fft_conv2d", fft)
+        native.conv2d.return_value = torch.zeros_like(fft_out)
+        monkeypatch.setattr(amd_tuned_torch.kernel_select, "_time", self._prefer(fft_out))
+        out = amd_tuned_torch._patched_conv2d(
+            torch.randn(1, 2, 8 + k - 1, 8 + k - 1), torch.randn(2, 2, k, k))
+        assert out is fft_out
+        fft.assert_called()
+        assert "fftconv" in amd_tuned_torch.kernel_select.debug_winners().values()
+
+    def test_large_kernel_wins_conv3d(self, monkeypatch, native):
+        force_eligible(monkeypatch)
+        k = amd_tuned_torch._FFTCONV_CONV3D_MIN_KERNEL
+        # Spatial size clears _FFTCONV_CONV3D_MIN_POSITIONS too (16 here,
+        # not 4 -- this test's subject is kernel width, min-positions has
+        # its own dedicated tests below).
+        s = 16
+        fft_out = torch.zeros(1, 2, s, s, s)
+        fft = MagicMock(return_value=fft_out)
+        monkeypatch.setattr(amd_tuned_torch.fftconv_ops, "fft_conv3d", fft)
+        native.conv3d.return_value = torch.zeros_like(fft_out)
+        monkeypatch.setattr(amd_tuned_torch.kernel_select, "_time", self._prefer(fft_out))
+        out = amd_tuned_torch._patched_conv3d(
+            torch.randn(1, 2, s + k - 1, s + k - 1, s + k - 1), torch.randn(2, 2, k, k, k))
+        assert out is fft_out
+        fft.assert_called()
+
+    def test_stock_still_wins_when_faster(self, monkeypatch, native):
+        """The tier is contested, not preferred: a large kernel where the
+        FFT measures slower must still land on stock."""
+        force_eligible(monkeypatch)
+        k = amd_tuned_torch._FFTCONV_CONV2D_MIN_KERNEL
+        x = torch.randn(1, 2, 8 + k - 1, 8 + k - 1)
+        w = torch.randn(2, 2, k, k)
+        expected = self._stock_conv2d(x, w)
+        fft_out = torch.zeros_like(expected)
+        monkeypatch.setattr(amd_tuned_torch.fftconv_ops, "fft_conv2d",
+                            MagicMock(return_value=fft_out))
+        # Leave only fftconv vs stock in the contest: the native tier is a
+        # MagicMock here, so letting it compete would just make it win on
+        # a tied stub timing and prove nothing about the FFT tier.
+        native.conv2d.side_effect = RuntimeError("no native kernel for this shape")
+
+        monkeypatch.setattr(amd_tuned_torch.kernel_select, "_time",
+                            self._fake_time(lambda out: 2.0 if out is fft_out else 1.0))
+        out = amd_tuned_torch._patched_conv2d(x, w)
+        assert torch.equal(out, expected)
+
+    def test_declining_fftconv_loses_contest_instead_of_raising(self, monkeypatch, native):
+        """OOM is a realistic outcome for the padded transform, so the
+        thunk declines rather than propagating -- the call still returns a
+        correct result from another tier."""
+        force_eligible(monkeypatch)
+        k = amd_tuned_torch._FFTCONV_CONV2D_MIN_KERNEL
+        x = torch.randn(1, 2, 8 + k - 1, 8 + k - 1)
+        w = torch.randn(2, 2, k, k)
+        expected = self._stock_conv2d(x, w)
+        monkeypatch.setattr(amd_tuned_torch.fftconv_ops, "fft_conv2d",
+                            MagicMock(side_effect=RuntimeError("HIP out of memory")))
+        # native declines too, so stock is the only candidate left standing.
+        native.conv2d.side_effect = RuntimeError("no native kernel for this shape")
+        monkeypatch.setattr(amd_tuned_torch.kernel_select, "_time",
+                            self._fake_time(lambda out: 1.0))
+        out = amd_tuned_torch._patched_conv2d(x, w)
+        assert torch.equal(out, expected)
+
+    def test_string_padding_declines(self, monkeypatch):
+        """F.convNd's "same"/"valid" padding modes aren't numbers -- the
+        contest's shape key and fft_conv's padding handling both want
+        numbers, so the tier declines rather than guessing."""
+        force_eligible(monkeypatch)
+        k = amd_tuned_torch._FFTCONV_CONV2D_MIN_KERNEL
+        assert amd_tuned_torch._fftconv_conv_candidate(
+            torch.randn(1, 2, 8 + k, 8 + k), torch.randn(2, 2, k, k), None,
+            1, "same", 1, 1, ndim=2) is None
+
+    def test_env_gate_disables_the_tier(self, monkeypatch):
+        force_eligible(monkeypatch)
+        monkeypatch.setattr(amd_tuned_torch, "_FFTCONV_CONV2D_ENABLED", False)
+        k = amd_tuned_torch._FFTCONV_CONV2D_MIN_KERNEL
+        assert amd_tuned_torch._fftconv_conv_candidate(
+            torch.randn(1, 2, 8 + k, 8 + k), torch.randn(2, 2, k, k), None,
+            1, 0, 1, 1, ndim=2) is None
+
+    def test_conv3d_declines_below_min_positions(self, monkeypatch):
+        """Small volumes never contest FFT-conv3d at all -- the padded
+        transform's fixed overhead can't pay for itself regardless of
+        kernel width, unlike the kernel-width gate above."""
+        force_eligible(monkeypatch)
+        k = amd_tuned_torch._FFTCONV_CONV3D_MIN_KERNEL
+        # 4^3 * batch 1 = 64 spatial positions, far below the 2048 default.
+        assert amd_tuned_torch._fftconv_conv_candidate(
+            torch.randn(1, 2, 4, 4, 4), torch.randn(2, 2, k, k, k), None,
+            1, 0, 1, 1, ndim=3) is None
+
+    def test_conv3d_min_positions_counts_batch_times_spatial(self, monkeypatch):
+        """The gate is batch * every spatial dim, not spatial alone -- a
+        small volume repeated across a big enough batch clears it, same
+        quantity flexgemm_ops._n_spatial_positions computes for its own
+        sparse-conv gate."""
+        force_eligible(monkeypatch)
+        monkeypatch.setattr(amd_tuned_torch, "_FFTCONV_CONV3D_MIN_POSITIONS", 100)
+        k = amd_tuned_torch._FFTCONV_CONV3D_MIN_KERNEL
+        # 4^3 = 64 per sample, batch 2 -> 128 >= 100.
+        assert amd_tuned_torch._fftconv_conv_candidate(
+            torch.randn(2, 2, 4, 4, 4), torch.randn(2, 2, k, k, k), None,
+            1, 0, 1, 1, ndim=3) is not None
+
+    def test_conv2d_is_not_gated_by_conv3d_min_positions(self, monkeypatch):
+        """The min-positions gate is conv3d-only -- a conv2d call this
+        small must still be considered (subject only to its own
+        kernel-width gate)."""
+        force_eligible(monkeypatch)
+        monkeypatch.setattr(amd_tuned_torch, "_FFTCONV_CONV3D_MIN_POSITIONS", 10**9)
+        k = amd_tuned_torch._FFTCONV_CONV2D_MIN_KERNEL
+        assert amd_tuned_torch._fftconv_conv_candidate(
+            torch.randn(1, 2, k, k), torch.randn(2, 2, k, k), None,
+            1, 0, 1, 1, ndim=2) is not None
+
+    def test_contest_without_the_tier_keeps_the_strict_default(self):
+        assert amd_tuned_torch._fftconv_contest_tolerance(
+            None, torch.randn(1, 2, 4, 4)) is None
+
+    def test_contest_with_the_tier_uses_fftconvs_relative_bar(self):
+        """The absolute half of this used to be computed here from the
+        operands; it now lives in kernel_select._verify, which scales atol
+        by the reference output's own RMS (see its docstring). What is
+        still this function's job is the RELATIVE part: FFT-conv is a
+        different algorithm from direct convolution and needs fftconv's
+        rtol, not fp32's default 1e-4."""
+        for dtype in (torch.float32, torch.float16):
+            got = amd_tuned_torch._fftconv_contest_tolerance(
+                ("fftconv", lambda: None), torch.randn(1, 2, 4, 4, dtype=dtype))
+            assert got == amd_tuned_torch.fftconv_ops.fftconv_tolerance(dtype)
+            assert got != amd_tuned_torch.kernel_select._TOLERANCES[dtype]
+
+
+class TestFftconvConv3dMinPositionsCalibrationPrecedence:
+    """_FFTCONV_CONV3D_MIN_POSITIONS's own default: explicit env var >
+    fftconv_calibration.load() > the hardcoded "2048" guess -- same
+    precedence flexgemm_ops.py's TestMinPositionsCalibrationPrecedence
+    already covers for its own sparse-conv gate, applied to
+    tools/benchmark_fftconv3d_min_positions.py's calibration instead.
+
+    Reloads the whole amd_tuned_torch package (not just a leaf *_ops
+    module) since _FFTCONV_CONV3D_MIN_POSITIONS is defined directly in
+    __init__.py -- confirmed safe in this suite because conftest.py's fake
+    _native/_native_ck/_native_hipblaslt modules are already registered in
+    sys.modules before the first import, so a reload finds them again
+    rather than trying to build the real extensions.
+    """
+
+    def teardown_method(self):
+        os.environ.pop("AMD_TUNED_TORCH_FFTCONV3D_MIN_POSITIONS", None)
+        importlib.reload(amd_tuned_torch)
+
+    def test_uses_hardcoded_default_when_no_calibration(self, monkeypatch):
+        monkeypatch.delenv("AMD_TUNED_TORCH_FFTCONV3D_MIN_POSITIONS", raising=False)
+        monkeypatch.setattr(amd_tuned_torch.fftconv_calibration, "load", lambda: {})
+        importlib.reload(amd_tuned_torch)
+        assert amd_tuned_torch._FFTCONV_CONV3D_MIN_POSITIONS == 2048
+
+    def test_uses_calibrated_value_when_present(self, monkeypatch):
+        monkeypatch.delenv("AMD_TUNED_TORCH_FFTCONV3D_MIN_POSITIONS", raising=False)
+        monkeypatch.setattr(amd_tuned_torch.fftconv_calibration, "load",
+                             lambda: {"conv3d": {"min_positions": 777}})
+        importlib.reload(amd_tuned_torch)
+        assert amd_tuned_torch._FFTCONV_CONV3D_MIN_POSITIONS == 777
+
+    def test_calibration_for_other_dim_or_field_does_not_affect_this_one(self, monkeypatch):
+        monkeypatch.delenv("AMD_TUNED_TORCH_FFTCONV3D_MIN_POSITIONS", raising=False)
+        monkeypatch.setattr(amd_tuned_torch.fftconv_calibration, "load",
+                             lambda: {"conv2d": {"min_positions": 111},
+                                      "conv3d": {"min_kernel": 9}})
+        importlib.reload(amd_tuned_torch)
+        assert amd_tuned_torch._FFTCONV_CONV3D_MIN_POSITIONS == 2048
+
+    def test_explicit_env_var_wins_over_calibration(self, monkeypatch):
+        monkeypatch.setenv("AMD_TUNED_TORCH_FFTCONV3D_MIN_POSITIONS", "999")
+        monkeypatch.setattr(amd_tuned_torch.fftconv_calibration, "load",
+                             lambda: {"conv3d": {"min_positions": 777}})
+        importlib.reload(amd_tuned_torch)
+        assert amd_tuned_torch._FFTCONV_CONV3D_MIN_POSITIONS == 999

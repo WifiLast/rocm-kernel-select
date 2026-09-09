@@ -29,8 +29,19 @@ amd_tuned_torch -- monkeypatches PyTorch's ROCm op dispatch on RX 7900 XTX
   - F.conv3d (groups=1, fp16/fp32) is backed by a hand-written HIP kernel
     (src/cuda/conv3d_fp{16,32}.cu, via compile_ops.conv3d_native) -- also
     ported from the original CMP-Turing project. Neither aiter nor
-    TransformerEngine cover conv3d at all, so there's no second tier before
-    stock (see _patched_conv3d).
+    TransformerEngine cover conv3d at all; Composable Kernel's WMMA conv
+    (ck_ops.conv3d, fp16/bf16) and FFT-conv (below) fill that gap, all
+    measured against stock per shape (see _patched_conv3d).
+  - F.conv2d/F.conv3d with a LARGE kernel additionally contest FFT-conv
+    (amd_tuned_torch.fftconv_ops, frequency-domain convolution), the one
+    tier here whose advantage is algorithmic rather than an
+    implementation detail: direct convolution pays K^ndim multiplies per
+    output element, an FFT pays for the transform once. It is gated by a
+    measured per-ndim kernel-width pre-filter so ordinary 3x3 convs never
+    pay for it, and it is where the largest win in this file lives
+    (measured 15^3 fp32 conv3d: stock 6907ms vs 38.8ms). See
+    _fftconv_conv_candidate's docstring for the crossover measurements
+    and AMD_TUNED_TORCH_FFTCONV2D/3D[_MIN_KERNEL] to retune or disable it.
   - F.group_norm is a hand-written HIP kernel (src/cuda/group_norm.cu, via
     the native HIP/C++ extension in src/main_rocm.cpp) -- neither aiter nor
     TransformerEngine cover GroupNorm (a diffusion-U-Net-specific op, not a
@@ -182,6 +193,48 @@ recompilation cost are workload-specific judgment calls. See
 amd_tuned_torch/torch_compile.py's module docstring for the aggressive defaults
 (max-autotune, Inductor freezing, static shapes) and ROCm-specific caveats.
 
+amd_tuned_torch.cumesh_ops, amd_tuned_torch.flexgemm_ops,
+amd_tuned_torch.nvdiffrast_ops, and amd_tuned_torch.torchsparse_ops are
+four more thin adapters over locally-built external packages bundled at
+third_party/{CuMesh,FlexGEMM,nvdiffrast,torchsparse} (this package is
+standalone -- these dependencies live under source/cmp_ext_turing, not in
+a sibling directory -- all ROCm/HIP-ported alongside this package; see
+each module's own docstring for exactly what that port involved), same
+shape as aiter_ops/te_ops: gated by available(), never raise at import
+time. Unlike aiter_ops/te_ops, cumesh_ops, nvdiffrast_ops, and
+torchsparse_ops have NO torch.nn.functional equivalent to intercept at all
+-- mesh simplification/UV-unwrapping/BVH queries, differentiable
+rasterization, and torchsparse's own richer SparseTensor-based sparse
+convolution are simply not things F.* covers -- so, like
+magcache/teacache/cache, none of them is installed by enable()/disable():
+each is a plain library surface a caller building a 3D/mesh/point-cloud
+pipeline on top of this package's other tuned dense ops reaches for
+explicitly. torchsparse_ops specifically forces torchsparse's own
+GatherScatter dataflow globally the first time its available() is checked
+-- this ROCm build has no tensor-core kernel for the other two dataflows
+upstream defaults to (see that module's docstring for exactly which
+source files were excluded and why).
+
+flexgemm_ops is the one exception: alongside its own plain-library sparse
+3D ops (sparse_conv3d, grid_sample_3d, encode_seq/decode_seq -- no F.*
+equivalent, same posture as cumesh_ops/nvdiffrast_ops), it ALSO installs a
+real occupancy-gated fast path inside _patched_conv2d/_patched_conv3d
+themselves: on every eligible F.conv2d/F.conv3d call, a cheap occupancy
+check (flexgemm_ops.maybe_sparse_conv2d/maybe_sparse_conv3d) routes to a
+sparse convolution instead of the dense native/CK/stock contest whenever
+the input tensor is mostly empty. This is content-dependent, not
+shape-dependent, so it is checked on every call rather than folded into
+kernel_select's per-shape cache -- see the "Sparse-pixel/-voxel fast path"
+comments in _patched_conv2d/_patched_conv3d and flexgemm_ops.py's own
+sparse_conv2d/sparse_conv3d_from_dense docstrings for the full design. ON
+by default; AMD_TUNED_TORCH_SPARSE_CONV2D=0 / AMD_TUNED_TORCH_SPARSE_CONV3D=0
+disable each independently. sparse_conv2d is pure PyTorch (no native
+extension involved, built from source/sparse_convolution's per-kernel-
+position gather-scatter method and source/spconv's coords/feats/weight
+convention -- see flexgemm_ops.py's docstring); sparse_conv3d is backed by
+third_party/FlexGEMM's native HIP kernel, so its fast path additionally
+requires flexgemm_ops.available().
+
 amd_tuned_torch.rocm_env_check is advisory only -- unlike everything else
 listed here, it never touches torch/ROCm behavior at all, just reads
 os.environ (and this package's own tier-availability state) at import time
@@ -245,6 +298,7 @@ type the other two would already cover.
 """
 from __future__ import annotations
 
+import math
 import os
 from typing import Any, Callable
 
@@ -309,6 +363,13 @@ from . import cache
 from . import hub_ops
 from . import torch_compile
 from . import miopen_fallback
+from . import cumesh_ops
+from . import sparse_conv_calibration
+from . import flexgemm_ops
+from . import fftconv_calibration
+from . import fftconv_ops
+from . import nvdiffrast_ops
+from . import torchsparse_ops
 
 
 # Raw, unpatched access to the native HIP group_norm kernel for manual use
@@ -325,6 +386,57 @@ _CONV_NATIVE_DTYPES = (torch.float16, torch.float32)  # conv2d/conv3d native HIP
 # the one conv case where stock ROCm has no good solver at all (see
 # ck_ops.py's measured table).
 _CK_CONV_DTYPES = (torch.float16, torch.bfloat16)
+# FFT-conv (amd_tuned_torch.fftconv_ops) as a conv2d/conv3d tier: fp32
+# included, unlike the CK/native tiers above. This is not a WMMA kernel --
+# the transform runs in float32 for every input dtype anyway (see
+# fft_conv's MIXED PRECISION docstring section), so fp32 input costs it
+# nothing extra, and fp16/bf16 buy less here than elsewhere.
+_FFTCONV_CONV_DTYPES = (torch.float16, torch.bfloat16, torch.float32)
+# Kernel width at/above which the FFT tier is worth CONTESTING (not
+# preferring -- kernel_select still measures it against stock/CK/native).
+# See _fftconv_conv_candidate's docstring for the measured crossovers
+# these defaults come from, and why 2D's sits an order of magnitude
+# higher in kernel width than 3D's.
+_FFTCONV_CONV2D_ENABLED = os.environ.get("AMD_TUNED_TORCH_FFTCONV2D", "1") != "0"
+_FFTCONV_CONV3D_ENABLED = os.environ.get("AMD_TUNED_TORCH_FFTCONV3D", "1") != "0"
+_FFTCONV_CONV2D_MIN_KERNEL = int(os.environ.get("AMD_TUNED_TORCH_FFTCONV2D_MIN_KERNEL", "32"))
+_FFTCONV_CONV3D_MIN_KERNEL = int(os.environ.get("AMD_TUNED_TORCH_FFTCONV3D_MIN_KERNEL", "7"))
+# Measured calibration (amd_tuned_torch.fftconv_calibration, written by
+# tools/benchmark_fftconv3d_min_positions.py) for the min_positions guess
+# below -- same "loaded once, before the constant it feeds is defined"
+# shape as flexgemm_ops.py's own _sparse_conv_calibration/_calibrated_default.
+# Precedence per env var: explicit env var (checked at the os.environ.get
+# call site below) > this measured calibration > the hardcoded guess as a
+# last resort for a GPU/build that hasn't been benchmarked yet.
+_fftconv_calibration_data = fftconv_calibration.load()
+
+
+def _calibrated_fftconv_default(dim_key: str, field: str, hardcoded_default: str) -> str:
+    """Same contract as flexgemm_ops._calibrated_default: the env-var
+    default for one (dim_key, field) pair, as a string (feeds straight into
+    os.environ.get(name, default)) -- a measured value if
+    fftconv_calibration loaded one, else `hardcoded_default`. Only ever
+    decides what the *default* is, never overrides an explicit env var."""
+    value = _fftconv_calibration_data.get(dim_key, {}).get(field)
+    return str(value) if value is not None else hardcoded_default
+
+
+# conv3d only, not conv2d: FFT-conv3d's padded transform is the most
+# memory-hungry tier in this file (measured ~1.5GB peak on a B=8 C=512
+# L=8192 conv1d whose inputs are only 134MB -- see _try_fftconv1d_fastpath's
+# OOM note), and for a small input volume there's no reasonable kernel width
+# for which paying that fixed transform/allocation overhead beats a cheap
+# direct conv outright, wide kernel or not. min(weight.shape[2:]) above only
+# gates on KERNEL size; this gates on `input`'s own spatial size (batch *
+# every dim after channel, same quantity flexgemm_ops._n_spatial_positions
+# computes for its sparse-conv gate, not imported from there to avoid a
+# cross-module dependency for one line). "2048" is a hardcoded fallback
+# guess, used only until tools/benchmark_fftconv3d_min_positions.py has
+# measured this GPU's actual crossover (see _calibrated_fftconv_default
+# above) -- override per-process via AMD_TUNED_TORCH_FFTCONV3D_MIN_POSITIONS.
+_FFTCONV_CONV3D_MIN_POSITIONS = int(
+    os.environ.get("AMD_TUNED_TORCH_FFTCONV3D_MIN_POSITIONS",
+                    _calibrated_fftconv_default("conv3d", "min_positions", "2048")))
 # silu excludes fp32: benchmarked slower than stock (0.80x, see
 # benchmark.json) even though fp16 is a real win (1.15x) -- fp32 stays on
 # the TE path's fp16/bf16-only sibling dtypes instead of falling back per-call.
@@ -396,6 +508,96 @@ def _restore(target: Any, name: str) -> None:
 # checked up front, plus a RuntimeError/AssertionError fallback for
 # unsupported shapes).
 # ---------------------------------------------------------------------------
+#
+# TRAINING-TIME GAP. _grad_safe() falling back to stock the instant any
+# input requires_grad was, for a long time, assumed to only matter for
+# occasional no_grad-adjacent calls. Measured on a real SDXL LoRA training
+# run (MIOpen verbose log, gfx1100, character-mode LoKr on to_q/to_k/to_v),
+# it is not occasional: once ANY adapter anywhere in the model needs a
+# gradient, autograd must be able to backprop through every frozen layer
+# between it and the loss, so nearly every activation in the whole forward
+# pass ends up requires_grad=True. _grad_safe() then declines for
+# essentially every linear/matmul/bmm/conv2d call in the network, not a few
+# of them -- this tier was, in practice, inference-only despite nothing
+# about it being conceptually limited to inference.
+#
+# _LinearFn/_BmmFn below close that gap for linear/matmul/bmm specifically
+# (matmul reuses _BmmFn -- _patched_matmul already reshapes every shape
+# family it accepts down to a bmm problem before the contest even runs, see
+# its own docstring, so its backward is exactly _BmmFn's too, composed with
+# the reshape/unsqueeze ops' own already-correct stock backward) -- conv2d's
+# backward is not reducible to calling conv2d again the same simple way,
+# see _patched_conv2d's own comment -- by wrapping the
+# existing accelerated forward candidates in a torch.autograd.Function
+# whose backward is the textbook GEMM derivative (dA = dY @ B^T, dB =
+# A^T @ dY), computed with plain `@`. That's it -- no new kernel, no new
+# numerically-unverified code path: autograd disables grad-tracking during
+# a Function's own backward() (nothing here calls torch.enable_grad()), so
+# _grad_safe() itself reports those backward matmuls as safe too, meaning
+# this module's own linear/matmul/bmm patches transparently accelerate the
+# backward pass as well, through the exact same kernel_select contest as
+# the forward pass. Forward is the only place a kernel *choice* is made;
+# backward is just correct math using operators this project didn't write.
+
+
+class _LinearFn(torch.autograd.Function):
+    """Makes _patched_linear's accelerated forward usable when a gradient
+    is needed -- see the TRAINING-TIME GAP note above for the full
+    rationale. fwd_fn is _patched_linear's own accelerated-candidate
+    selection, called unchanged; only the backward is new here."""
+
+    @staticmethod
+    def forward(ctx, input, weight, bias, fwd_fn):
+        ctx.save_for_backward(input, weight)
+        ctx.has_bias = bias is not None
+        return fwd_fn(input, weight, bias)
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        input, weight = ctx.saved_tensors
+        # F.linear itself accepts any input.dim() >= 1 (batched over every
+        # leading dim) but the GEMM math is 2D -- flatten every leading dim
+        # into one, matching how _patched_linear's own kernel_select key
+        # already treats "input.numel() // input.size(-1)" as the M dim.
+        grad_output_2d = grad_output.reshape(-1, grad_output.shape[-1])
+        input_2d = input.reshape(-1, input.shape[-1])
+        grad_input = grad_weight = grad_bias = None
+        if ctx.needs_input_grad[0]:
+            grad_input = (grad_output_2d @ weight).reshape(input.shape)
+        if ctx.needs_input_grad[1]:
+            grad_weight = grad_output_2d.t() @ input_2d
+        if ctx.has_bias and ctx.needs_input_grad[2]:
+            grad_bias = grad_output_2d.sum(0)
+        return grad_input, grad_weight, grad_bias, None
+
+
+class _BmmFn(torch.autograd.Function):
+    """Makes _patched_bmm's (and, via _patched_matmul, its reshaped-to-3D
+    reuse of the same contest) accelerated forward usable when a gradient
+    is needed. Y = A @ B, both always exactly 3D (batch, M, K) @ (batch, K,
+    N) by the time this is called -- _patched_matmul reshapes every shape
+    family it accepts (2D, 3D, >=4D) down to this via ordinary
+    unsqueeze/reshape before ever reaching here. Those are themselves
+    differentiable stock ops, so calling this on their output composes
+    correctly with no extra work: autograd chains this Function's backward
+    straight into unsqueeze/reshape's own (already correct) backward to
+    produce a gradient in the original, un-reshaped shape."""
+
+    @staticmethod
+    def forward(ctx, a, b, fwd_fn):
+        ctx.save_for_backward(a, b)
+        return fwd_fn(a, b)
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        a, b = ctx.saved_tensors
+        grad_a = grad_b = None
+        if ctx.needs_input_grad[0]:
+            grad_a = grad_output @ b.transpose(-2, -1)
+        if ctx.needs_input_grad[1]:
+            grad_b = a.transpose(-2, -1) @ grad_output
+        return grad_a, grad_b, None
+
 
 def _patched_linear(input, weight, bias=None):
     """F.linear over a per-shape contest: stock, hipBLASLt, CK GEMM.
@@ -432,61 +634,77 @@ def _patched_linear(input, weight, bias=None):
     the safe failure mode this whole module exists to guarantee.
     """
     orig = _ORIGINALS[(F, "linear")]
-    if not (_grad_safe(input, weight, bias) and _usable(input, weight)):
+    if not _usable(input, weight):
         return orig(input, weight, bias)
     if input.dim() < 2 or weight.dim() != 2:
         return orig(input, weight, bias)
 
-    if kernel_select.enabled():
-        # Keyed on the GEMM's actual identity (M, K, N and dtype), not on
-        # the caller's leading dims: [4, 128, K] and [512, K] are one
-        # problem to every candidate here, and keying on the raw shape
-        # would re-run the contest for each of them.
-        key = (input.dtype, int(input.numel() // input.size(-1)),
-               tuple(weight.shape), bias is not None)
-        won = kernel_select.cached_key("linear", key)
-        if won == "stock":
-            return orig(input, weight, bias)
-        if won is None:
-            out = kernel_select.pick_key("linear", key, [
-                ("hipblaslt", lambda: hipblaslt_ops.linear(
-                    input, weight, bias,
-                    hipblaslt_ops.EPILOGUE_BIAS if bias is not None
-                    else hipblaslt_ops.EPILOGUE_NONE)),
-                ("ck_gemm", lambda: ck_gemm_ops.linear(
-                    input, weight, bias,
-                    ck_gemm_ops.EPILOGUE_BIAS if bias is not None
-                    else ck_gemm_ops.EPILOGUE_NONE)),
-                # Decode-shaped (small-M) candidate only -- see
-                # splitk_gemm_ops.py's module docstring for why hipBLASLt/
-                # CK both regress at M=1 and what this does about it.
-                # Declines (returns None) for any M outside its target
-                # range, same as every other candidate here.
-                ("splitk", lambda: splitk_gemm_ops.linear(input, weight, bias)),
-                ("aiter", lambda: _linear_aiter(input, weight, bias)),
-                ("stock", lambda: orig(input, weight, bias)),
-            ])
-            if out is not None:
-                return out
-        elif won == "hipblaslt":
-            out = hipblaslt_ops.linear(input, weight, bias,
-                                       hipblaslt_ops.EPILOGUE_BIAS if bias is not None
-                                       else hipblaslt_ops.EPILOGUE_NONE)
-            if out is not None:
-                return out
-        elif won == "ck_gemm":
-            out = ck_gemm_ops.linear(input, weight, bias,
-                                     ck_gemm_ops.EPILOGUE_BIAS if bias is not None
-                                     else ck_gemm_ops.EPILOGUE_NONE)
-            if out is not None:
-                return out
-        elif won == "splitk":
-            out = splitk_gemm_ops.linear(input, weight, bias)
-            if out is not None:
-                return out
+    def _accelerated(input, weight, bias):
+        if kernel_select.enabled():
+            # Keyed on the GEMM's actual identity (M, K, N and dtype), not
+            # on the caller's leading dims: [4, 128, K] and [512, K] are one
+            # problem to every candidate here, and keying on the raw shape
+            # would re-run the contest for each of them.
+            key = (input.dtype, int(input.numel() // input.size(-1)),
+                   tuple(weight.shape), bias is not None)
+            won = kernel_select.cached_key("linear", key)
+            if won == "stock":
+                return orig(input, weight, bias)
+            if won is None:
+                out = kernel_select.pick_key("linear", key, [
+                    ("hipblaslt", lambda: compile_ops.hipblaslt_linear(
+                        input, weight, bias,
+                        hipblaslt_ops.EPILOGUE_BIAS if bias is not None
+                        else hipblaslt_ops.EPILOGUE_NONE)),
+                    ("ck_gemm", lambda: compile_ops.ck_gemm_linear(
+                        input, weight, bias,
+                        ck_gemm_ops.EPILOGUE_BIAS if bias is not None
+                        else ck_gemm_ops.EPILOGUE_NONE)),
+                    # Decode-shaped (small-M) candidate only -- see
+                    # splitk_gemm_ops.py's module docstring for why
+                    # hipBLASLt/CK both regress at M=1 and what this does
+                    # about it. Declines (returns None) for any M outside
+                    # its target range, same as every other candidate here.
+                    ("splitk", lambda: splitk_gemm_ops.linear(input, weight, bias)),
+                    ("aiter", lambda: _linear_aiter(input, weight, bias)),
+                    ("stock", lambda: orig(input, weight, bias)),
+                ])
+                if out is not None:
+                    return out
+            elif won == "hipblaslt":
+                # compile_ops.hipblaslt_linear/ck_gemm_linear (not
+                # hipblaslt_ops.linear/ck_gemm_ops.linear directly): this is
+                # the hot path a cached contest winner takes on every
+                # subsequent call, i.e. the actual monkeypatched-F.linear
+                # call torch.compile would trace through -- see
+                # compile_ops.py's own docstring for why it wraps these two
+                # as torch.library custom ops.
+                out = compile_ops.hipblaslt_linear(input, weight, bias,
+                                           hipblaslt_ops.EPILOGUE_BIAS if bias is not None
+                                           else hipblaslt_ops.EPILOGUE_NONE)
+                if out is not None:
+                    return out
+            elif won == "ck_gemm":
+                out = compile_ops.ck_gemm_linear(input, weight, bias,
+                                         ck_gemm_ops.EPILOGUE_BIAS if bias is not None
+                                         else ck_gemm_ops.EPILOGUE_NONE)
+                if out is not None:
+                    return out
+            elif won == "splitk":
+                out = splitk_gemm_ops.linear(input, weight, bias)
+                if out is not None:
+                    return out
 
-    out = _linear_aiter(input, weight, bias)
-    return orig(input, weight, bias) if out is None else out
+        out = _linear_aiter(input, weight, bias)
+        return orig(input, weight, bias) if out is None else out
+
+    if _grad_safe(input, weight, bias):
+        return _accelerated(input, weight, bias)
+    # A gradient is needed -- route through _LinearFn so the accelerated
+    # forward above still runs, with a real (textbook, stock-matmul-based)
+    # backward instead of skipping acceleration entirely. See the
+    # TRAINING-TIME GAP note above _LinearFn's definition.
+    return _LinearFn.apply(input, weight, bias, _accelerated)
 
 
 def _linear_aiter(input, weight, bias):
@@ -517,7 +735,7 @@ def _patched_matmul(input, other, *, out=None):
     all -- the same gap _patched_linear/_patched_bmm closed once hipBLASLt
     and CK GEMM existed as real candidates, just never closed here too."""
     orig = _ORIGINALS[(torch, "matmul")]
-    if out is not None or not (_grad_safe(input, other) and _usable(input, other)):
+    if out is not None or not _usable(input, other):
         return orig(input, other) if out is None else orig(input, other, out=out)
     if input.dtype != other.dtype:
         return orig(input, other)
@@ -541,28 +759,41 @@ def _patched_matmul(input, other, *, out=None):
     # leading batch dim), so `orig` applied here is a safe, cheap stock
     # reference -- no need to reach for a separate "true" matmul call on
     # the un-reshaped tensors.
-    def _stock3(): return orig(a3, b3)
+    def _stock3(a3, b3): return orig(a3, b3)
 
-    if kernel_select.enabled():
-        key = (input.dtype, tuple(a3.shape), tuple(b3.shape))
-        won = kernel_select.cached_key("matmul", key)
-        if won == "stock":
-            return _reshape_back(_stock3())
-        if won == "hipblaslt":
-            got = hipblaslt_ops.bmm(a3, b3)
-            if got is not None:
-                return _reshape_back(got)
-        elif won is None:
-            got = kernel_select.pick_key("matmul", key, [
-                ("hipblaslt", lambda: hipblaslt_ops.bmm(a3, b3)),
-                ("aiter", lambda: _bmm_aiter(a3, b3)),
-                ("stock", _stock3),
-            ])
-            if got is not None:
-                return _reshape_back(got)
+    def _accelerated(a3, b3):
+        if kernel_select.enabled():
+            key = (a3.dtype, tuple(a3.shape), tuple(b3.shape))
+            won = kernel_select.cached_key("matmul", key)
+            if won == "stock":
+                return _stock3(a3, b3)
+            if won == "hipblaslt":
+                # compile_ops.hipblaslt_bmm, not hipblaslt_ops.bmm directly
+                # -- same reasoning as _patched_linear's cached-winner
+                # branches above.
+                got = compile_ops.hipblaslt_bmm(a3, b3)
+                if got is not None:
+                    return got
+            elif won is None:
+                got = kernel_select.pick_key("matmul", key, [
+                    ("hipblaslt", lambda: compile_ops.hipblaslt_bmm(a3, b3)),
+                    ("aiter", lambda: _bmm_aiter(a3, b3)),
+                    ("stock", lambda: _stock3(a3, b3)),
+                ])
+                if got is not None:
+                    return got
 
-    got = _bmm_aiter(a3, b3)
-    return _reshape_back(got) if got is not None else orig(input, other)
+        got = _bmm_aiter(a3, b3)
+        return _stock3(a3, b3) if got is None else got
+
+    if _grad_safe(input, other):
+        return _reshape_back(_accelerated(a3, b3))
+    # See _LinearFn/_patched_linear's identical reasoning. a3/b3 are
+    # themselves ordinary autograd-tracked views of input/other (unsqueeze
+    # or reshape), so _BmmFn's backward composes automatically with their
+    # own (stock, already-correct) backward -- nothing extra needed for the
+    # 2D/>=4D reshape cases here.
+    return _reshape_back(_BmmFn.apply(a3, b3, _accelerated))
 
 
 def _patched_bmm(input, mat2, *, out=None):
@@ -576,31 +807,41 @@ def _patched_bmm(input, mat2, *, out=None):
     1.49x fp16 / 1.73x bf16 against stock.
     """
     orig = _ORIGINALS[(torch, "bmm")]
-    if out is not None or not (_grad_safe(input, mat2) and _usable(input, mat2)):
+    if out is not None or not _usable(input, mat2):
         return orig(input, mat2) if out is None else orig(input, mat2, out=out)
     if input.dtype != mat2.dtype:
         return orig(input, mat2)
 
-    if kernel_select.enabled():
-        key = (input.dtype, tuple(input.shape), tuple(mat2.shape))
-        won = kernel_select.cached_key("bmm", key)
-        if won == "stock":
-            return orig(input, mat2)
-        if won == "hipblaslt":
-            got = hipblaslt_ops.bmm(input, mat2)
-            if got is not None:
-                return got
-        elif won is None:
-            got = kernel_select.pick_key("bmm", key, [
-                ("hipblaslt", lambda: hipblaslt_ops.bmm(input, mat2)),
-                ("aiter", lambda: _bmm_aiter(input, mat2)),
-                ("stock", lambda: orig(input, mat2)),
-            ])
-            if got is not None:
-                return got
+    def _accelerated(input, mat2):
+        if kernel_select.enabled():
+            key = (input.dtype, tuple(input.shape), tuple(mat2.shape))
+            won = kernel_select.cached_key("bmm", key)
+            if won == "stock":
+                return orig(input, mat2)
+            if won == "hipblaslt":
+                # compile_ops.hipblaslt_bmm, not hipblaslt_ops.bmm directly
+                # -- same reasoning as _patched_linear's cached-winner
+                # branches above.
+                got = compile_ops.hipblaslt_bmm(input, mat2)
+                if got is not None:
+                    return got
+            elif won is None:
+                got = kernel_select.pick_key("bmm", key, [
+                    ("hipblaslt", lambda: compile_ops.hipblaslt_bmm(input, mat2)),
+                    ("aiter", lambda: _bmm_aiter(input, mat2)),
+                    ("stock", lambda: orig(input, mat2)),
+                ])
+                if got is not None:
+                    return got
 
-    got = _bmm_aiter(input, mat2)
-    return orig(input, mat2) if got is None else got
+        got = _bmm_aiter(input, mat2)
+        return orig(input, mat2) if got is None else got
+
+    if _grad_safe(input, mat2):
+        return _accelerated(input, mat2)
+    # See _LinearFn/_patched_linear's identical reasoning -- _BmmFn's
+    # backward is the textbook bmm derivative, computed with plain `@`.
+    return _BmmFn.apply(input, mat2, _accelerated)
 
 
 def _bmm_aiter(input, mat2):
@@ -635,6 +876,103 @@ def _is_pointwise_conv2d(weight, stride, padding, dilation) -> bool:
             and tuple(aiter_ops._pair(dilation)) == (1, 1))
 
 
+def _fftconv_conv_candidate(input, weight, bias, stride, padding, dilation, groups,
+                             *, ndim: int):
+    """The FFT-conv tier (amd_tuned_torch.fftconv_ops) as a (name, thunk)
+    kernel_select candidate for conv2d/conv3d, or None when this call
+    isn't worth contesting it for at all.
+
+    WHY A PRE-FILTER AND NOT JUST ANOTHER CANDIDATE. FFT-conv's
+    O(N log N)-per-spatial-dim win only arrives once the kernel is wide
+    enough to pay for the transform (see fftconv_ops' own module
+    docstring). Measured on gfx1100 against stock, fp32:
+
+      conv2d 4x32x256x256   7x7  1.31ms -> 18.79ms  (14.3x LOSS)
+                           15x15  2.50ms -> 16.93ms  ( 6.8x loss)
+                           31x31 10.17ms -> 19.59ms  ( 1.9x loss)
+                           63x63 38.65ms -> 38.85ms  (even)
+      conv3d 1x32x32x64x64   3^3  2.71ms -> 13.26ms  ( 4.9x loss)
+                             7^3 33.76ms -> 30.24ms  ( 1.1x win)
+                            15^3 6907ms  -> 38.77ms  ( 178x WIN)
+
+    Direct convolution costs K^ndim multiplies per output element while
+    the transform costs the same regardless, so 3D crosses over an order
+    of magnitude lower in kernel width than 2D -- hence two separate
+    thresholds rather than one shared "large kernel" number. Both sit far
+    above the 3x3-style kernels this package's other conv tiers exist
+    for, and offering the candidate down there would buy nothing while
+    costing every distinct small shape one contest measurement plus a
+    full padded-transform allocation. Same posture as
+    fftconv_ops._FFTCONV1D_MIN_KERNEL on the conv1d path: a cheap
+    pre-filter, NOT the win/lose decision, which stays measured per shape.
+
+    None when the tier is switched off (AMD_TUNED_TORCH_FFTCONV2D=0 /
+    AMD_TUNED_TORCH_FFTCONV3D=0), `input`/`weight` aren't `ndim`-spatial
+    conv tensors, any spatial kernel extent is below the threshold,
+    `input` is a small volume (conv3d only -- see
+    AMD_TUNED_TORCH_FFTCONV3D_MIN_POSITIONS above this function), `padding`
+    is one of F.convNd's string modes ("same"/"valid" -- the contest's
+    shape key and fft_conv's own padding handling both want numbers), or
+    the dtype/device isn't one this tier covers. The thunk itself returns
+    None (declining, per kernel_select.pick's contract) rather than raising
+    if the call fails -- including on OOM, which is a
+    realistic outcome here specifically: the padded transform is by far
+    the most memory-hungry tier in this file (measured ~1.5GB peak on a
+    B=8 C=512 L=8192 conv1d whose inputs are 134MB), and a tier that
+    can't fit should lose the contest, not kill the process."""
+    if ndim == 2:
+        if not _FFTCONV_CONV2D_ENABLED:
+            return None
+        min_kernel, fn = _FFTCONV_CONV2D_MIN_KERNEL, fftconv_ops.fft_conv2d
+    else:
+        if not _FFTCONV_CONV3D_ENABLED:
+            return None
+        min_kernel, fn = _FFTCONV_CONV3D_MIN_KERNEL, fftconv_ops.fft_conv3d
+    if input.dim() != ndim + 2 or weight.dim() != ndim + 2:
+        return None
+    if ndim == 3 and input.shape[0] * math.prod(input.shape[2:]) < _FFTCONV_CONV3D_MIN_POSITIONS:
+        return None
+    if isinstance(padding, str):
+        return None
+    if min(weight.shape[2:]) < min_kernel:
+        return None
+    if not _usable(input, weight, dtypes=_FFTCONV_CONV_DTYPES):
+        return None
+
+    def _thunk():
+        try:
+            return fn(input, weight, bias=bias, padding=padding, stride=stride,
+                      dilation=dilation, groups=groups)
+        except (RuntimeError, ValueError, TypeError):
+            return None
+
+    return ("fftconv", _thunk)
+
+
+def _fftconv_contest_tolerance(fft_candidate, input):
+    """kernel_select verification tolerance for a conv contest that has the
+    FFT tier in it, or None to keep kernel_select's per-dtype default for
+    a contest that doesn't.
+
+    Only the RELATIVE part differs here. FFT-conv doesn't merely round
+    differently from direct convolution, it rounds BETTER -- measured
+    against a float64 reference on a 1x8x1024 fp32 conv1d, at K=255
+    direct is off by 2.6e-4 and FFT by 7.9e-5; at K=1023, 8.6e-4 vs
+    1.5e-4 -- but it is a different algorithm, so its disagreement with
+    direct convolution is larger than fp32's default rtol of 1e-4 admits
+    (fftconv_ops.fftconv_tolerance carries the measured pairs and the
+    reasoning). The ABSOLUTE part is no longer this function's problem:
+    kernel_select._verify now scales its atol floor by the reference
+    output's own RMS, from the reference tensor it already holds, which
+    is both more accurate than estimating the output magnitude from the
+    operands here and fixes the same defect for every other tier at once
+    (see _verify's docstring for the three kernels a purely absolute atol
+    was rejecting)."""
+    if fft_candidate is None:
+        return None
+    return fftconv_ops.fftconv_tolerance(input.dtype)
+
+
 def _patched_conv2d(input, weight, bias=None, stride=1, padding=0, dilation=1, groups=1):
     # Three tiers: native HIP kernel (fp16/fp32, this project's own
     # src/cuda/conv2d_fp{16,32}.cu) first, then aiter's Triton conv2d
@@ -643,9 +981,56 @@ def _patched_conv2d(input, weight, bias=None, stride=1, padding=0, dilation=1, g
     # import time, same as group_norm); aiter is optional.
     orig = _ORIGINALS[(F, "conv2d")]
     if groups != 1 or not _grad_safe(input, weight, bias):
+        # CONFIRMED VIA A REAL SDXL LoRA TRAINING RUN (MIOpen verbose log,
+        # gfx1100, character-mode LoKr targeting to_q/to_k/to_v): this branch
+        # is not a rare edge case during training, it is EVERY conv2d call.
+        # Frozen conv weights don't matter here -- _grad_safe() also declines
+        # whenever the *input activation* requires_grad, and once any
+        # upstream param anywhere in the graph needs a gradient (any LoRA
+        # adapter, anywhere in the UNet), autograd must be able to backprop
+        # THROUGH every frozen conv layer between that adapter and the loss,
+        # so its activations requires_grad=True too. The logged run showed
+        # zero native/CK/kernel_select decisions and 100% stock MIOpen calls
+        # for every single conv2d, forward and backward. This tier is
+        # effectively inference-only in practice (no_grad image generation),
+        # not just in theory -- worth knowing before expecting any conv2d
+        # speedup from this module during training specifically.
+        #
+        # That same log is also where stock itself doesn't have a fast path:
+        # every logged backward-data call with symmetric in==out channels
+        # and stride 1 got MIOpen's Winograd assembly kernel
+        # (miopenSp3AsmConv_v30_3_1_gfx11_fp16_dot2_f2x3_stride1) -- but
+        # every call with asymmetric channels (concatenated-skip-connection
+        # ResNet convs: 1280->640, 1920->640, 1920->1280, 2560->1280) or
+        # stride 2 (downsampling convs: 640->640 H64xW37, 320->320 H128xW73)
+        # fell back to the slower Col2Im2dU (im2col+GEMM) kernel instead.
+        # Those specific shapes -- not the symmetric stride-1 case, where
+        # stock's Winograd already wins by 4.6x per ck_ops.py's own fp16
+        # benchmark -- are where a real (currently nonexistent) backward
+        # pass for this module's native/CK conv2d kernels would have an
+        # actual opening during training, if that's ever worth building.
         return orig(input, weight, bias, stride, padding, dilation, groups)
     if _is_pointwise_conv2d(weight, stride, padding, dilation):
         return orig(input, weight, bias, stride, padding, dilation, groups)
+
+    # Sparse-pixel fast path, same occupancy-gated design as _patched_conv3d's
+    # equivalent check above it (see flexgemm_ops.maybe_sparse_conv2d's
+    # docstring) -- content-dependent, so re-checked every call rather than
+    # folded into kernel_select's shape cache below. The check itself is
+    # cheap on the dense activations a U-Net is made of: 0.0035ms against a
+    # 0.326ms conv on 1x320x64x64, i.e. 1.1%, and it declines immediately.
+    # AMD_TUNED_TORCH_SPARSE_CONV2D=0 disables it. It also declines unless
+    # flex_gemm's native extension is built: this used to run the
+    # pure-Python gather/scatter instead, which measured 20-60x SLOWER than
+    # stock on exactly the sparse inputs it accepted (numbers in
+    # maybe_sparse_conv2d's docstring).
+    if flexgemm_ops.sparse_conv2d_enabled() and input.dim() == 4 and weight.dim() == 4:
+        _sparse_out = flexgemm_ops.maybe_sparse_conv2d(
+            input, weight, bias, stride=aiter_ops._pair(stride),
+            padding=aiter_ops._pair(padding), dilation=aiter_ops._pair(dilation))
+        if _sparse_out is not None:
+            return _sparse_out
+
     # Which kernel wins is measured per shape, stock included as a
     # candidate -- see kernel_select.py. This is deliberately NOT a fixed
     # ordering: on gfx1100 stock beats our kernels for fp16/fp32 conv2d
@@ -668,6 +1053,13 @@ def _patched_conv2d(input, weight, bias=None, stride=1, padding=0, dilation=1, g
                 return compile_ops.conv2d_native(input, weight, bias, stride, padding, dilation)
             except (RuntimeError, TypeError):
                 pass
+        elif _won == "fftconv":
+            _fft_won = _fftconv_conv_candidate(input, weight, bias, stride, padding,
+                                                dilation, groups, ndim=2)
+            if _fft_won is not None:
+                _out = _fft_won[1]()
+                if _out is not None:
+                    return _out
 
         candidates = []
         if ck_ops.available() and _usable(input, weight, dtypes=_CK_CONV_DTYPES):
@@ -678,14 +1070,32 @@ def _patched_conv2d(input, weight, bias=None, stride=1, padding=0, dilation=1, g
             candidates.append(
                 ("native", lambda: compile_ops.conv2d_native(
                     input, weight, bias, stride, padding, dilation)))
+        # Large-kernel tier: only contested at all above a measured kernel
+        # width (see _fftconv_conv_candidate), so a U-Net's 3x3 convs never
+        # pay for it.
+        _fft = _fftconv_conv_candidate(input, weight, bias, stride, padding,
+                                        dilation, groups, ndim=2)
+        if _fft is not None:
+            candidates.append(_fft)
         candidates.append(
             ("stock", lambda: orig(input, weight, bias, stride, padding, dilation, groups)))
-        out = kernel_select.pick("conv2d", input, weight, stride, padding, dilation, candidates)
+        out = kernel_select.pick("conv2d", input, weight, stride, padding, dilation, candidates,
+                                  tolerance=_fftconv_contest_tolerance(_fft, input))
         if out is not None:
             return out
 
     # conv_select disabled (AMD_TUNED_TORCH_MEASURE_KERNELS=0): fall back to the
-    # old fixed ordering, our kernels first.
+    # old fixed ordering, our kernels first. The FFT tier goes first of all
+    # for a kernel wide enough to have passed its pre-filter: with no contest
+    # to measure anything, that pre-filter is all the evidence there is, and
+    # it is the same static-heuristic posture fftconv_ops.maybe_fft_conv1d
+    # keeps for callers who don't want to pay a contest either.
+    _fft = _fftconv_conv_candidate(input, weight, bias, stride, padding,
+                                    dilation, groups, ndim=2)
+    if _fft is not None:
+        _out = _fft[1]()
+        if _out is not None:
+            return _out
     if ck_ops.available() and _usable(input, weight, dtypes=_CK_CONV_DTYPES):
         try:
             _ck = ck_ops.conv2d(input, weight, bias, stride, padding, dilation)
@@ -716,6 +1126,29 @@ def _patched_conv3d(input, weight, bias=None, stride=1, padding=0, dilation=1, g
     orig = _ORIGINALS[(F, "conv3d")]
     if groups != 1 or not _grad_safe(input, weight, bias):
         return orig(input, weight, bias, stride, padding, dilation, groups)
+
+    # Sparse-voxel fast path: routes to flex_gemm's sparse_conv3d instead of
+    # a dense kernel when `input` is mostly empty (e.g. a voxelized surface
+    # or point cloud, as opposed to a diffusion U-Net's normally-dense
+    # activations). This is a CONTENT-dependent decision -- occupancy, not
+    # shape -- so unlike the kernel_select contest just below, it can't be
+    # cached by (dtype, shape, stride, padding, dilation): two calls with an
+    # identical shape key can have very different occupancy. It is instead
+    # re-checked on every eligible call via a single cheap reduction over
+    # `input` (see flexgemm_ops.maybe_sparse_conv3d's docstring for that
+    # cost and the unvalidated default occupancy threshold). Declines
+    # (returns None) instantly back to the dense contest below whenever
+    # flex_gemm isn't installed, AMD_TUNED_TORCH_SPARSE_CONV3D=0 has
+    # disabled it, or occupancy is at/above the threshold -- so a normal
+    # dense conv3d call pays only the one reduction pass, never a wasted
+    # sparse-kernel attempt.
+    if flexgemm_ops.sparse_conv3d_enabled() and input.dim() == 5 and weight.dim() == 5:
+        _sparse_out = flexgemm_ops.maybe_sparse_conv3d(
+            input, weight, bias, stride=_triple(stride), padding=_triple(padding),
+            dilation=_triple(dilation))
+        if _sparse_out is not None:
+            return _sparse_out
+
     # Measured per shape with stock as a candidate, exactly as in
     # _patched_conv2d. conv3d is where our kernels look best (CK 1.16ms vs
     # stock 3.02ms at fp16) but fp32 is within noise of stock (0.95x), so
@@ -737,6 +1170,13 @@ def _patched_conv3d(input, weight, bias=None, stride=1, padding=0, dilation=1, g
                 return compile_ops.conv3d_native(input, weight, bias, stride, padding, dilation)
             except (RuntimeError, TypeError):
                 pass
+        elif _won == "fftconv":
+            _fft_won = _fftconv_conv_candidate(input, weight, bias, stride, padding,
+                                                dilation, groups, ndim=3)
+            if _fft_won is not None:
+                _out = _fft_won[1]()
+                if _out is not None:
+                    return _out
 
         candidates = []
         if ck_ops.available() and _usable(input, weight, dtypes=_CK_CONV_DTYPES):
@@ -747,13 +1187,30 @@ def _patched_conv3d(input, weight, bias=None, stride=1, padding=0, dilation=1, g
             candidates.append(
                 ("native", lambda: compile_ops.conv3d_native(
                     input, weight, bias, stride, padding, dilation)))
+        # Large-kernel tier, and the one place in this file where it wins
+        # by orders of magnitude rather than percent: direct conv3d pays
+        # K^3 multiplies per output element (measured 15^3 fp32: stock
+        # 6907ms vs 38.8ms here). See _fftconv_conv_candidate.
+        _fft = _fftconv_conv_candidate(input, weight, bias, stride, padding,
+                                        dilation, groups, ndim=3)
+        if _fft is not None:
+            candidates.append(_fft)
         candidates.append(
             ("stock", lambda: orig(input, weight, bias, stride, padding, dilation, groups)))
-        out = kernel_select.pick("conv3d", input, weight, stride, padding, dilation, candidates)
+        out = kernel_select.pick("conv3d", input, weight, stride, padding, dilation, candidates,
+                                  tolerance=_fftconv_contest_tolerance(_fft, input))
         if out is not None:
             return out
 
-    # conv_select disabled: old fixed ordering, our kernels first.
+    # conv_select disabled: old fixed ordering, our kernels first -- with
+    # the FFT tier ahead of them for a wide-enough kernel, same reasoning
+    # as _patched_conv2d's equivalent branch.
+    _fft = _fftconv_conv_candidate(input, weight, bias, stride, padding,
+                                    dilation, groups, ndim=3)
+    if _fft is not None:
+        _out = _fft[1]()
+        if _out is not None:
+            return _out
     if ck_ops.available() and _usable(input, weight, dtypes=_CK_CONV_DTYPES):
         try:
             _ck = ck_ops.conv3d(input, weight, bias, stride, padding, dilation)
@@ -1331,7 +1788,7 @@ _flash_attn_rocwmma_fallback: Callable | None = None
 _FLASH_ATTN_ROCWMMA_DTYPES = (torch.float16, torch.bfloat16)
 
 
-def _is_flash_attn_rocwmma_eligible(query, key, attn_mask, dropout_p, is_causal) -> bool:
+def _is_flash_attn_rocwmma_eligible(query, key, value, attn_mask, dropout_p, is_causal) -> bool:
     """True only for shapes flash_attn_rocwmma_ops's vendored kernel
     actually supports: no attn_mask at all (its host.cpp forward/backward
     signatures take only a `causal: bool` -- there is no mask tensor
@@ -1350,10 +1807,44 @@ def _is_flash_attn_rocwmma_eligible(query, key, attn_mask, dropout_p, is_causal)
     bottom-right causal are only identical when query_len == key_len, so
     is_causal is only honored in that case -- anything else (e.g.
     KV-cache decoding, q_len < kv_len) falls back rather than silently
-    computing the wrong mask."""
+    computing the wrong mask.
+
+    The equal-head-count requirement is there for the same reason and is
+    just as load-bearing. The vendored kernel has no MQA/GQA support at
+    all: host.cpp's fwd_parm/bwd_parm carry a single head count, and the
+    kernel indexes K and V by the QUERY head index. Hand it a K/V with
+    fewer heads than Q -- the standard GQA layout, and what
+    F.scaled_dot_product_attention(..., enable_gqa=True) passes -- and it
+    reads past the end of those tensors. Measured on gfx1100, Q(2,8,512,64)
+    against K/V(2,2,512,64) in bf16 returns non-finite values, and the same
+    out-of-bounds access intermittently traps as
+
+        HIP error: an illegal memory access was encountered
+
+    which poisons the HIP context for the rest of the process, so the
+    failure usually surfaces later, in whatever unrelated CUDA call
+    synchronizes next.
+
+    Note this is not merely about which kernel wins: kernel_select's
+    contest CALLS each candidate to time it, so on a cold cache an
+    ineligible-but-not-rejected shape faults during measurement even when
+    the fallback would have been chosen. The guard therefore has to be
+    here, in eligibility, not in the ranking."""
     if attn_mask is not None or dropout_p != 0.0 or query.dim() != 4:
         return False
-    if not _usable(query, key, dtypes=_FLASH_ATTN_ROCWMMA_DTYPES):
+    if not _usable(query, key, value, dtypes=_FLASH_ATTN_ROCWMMA_DTYPES):
+        return False
+    if key.dim() != 4 or value.dim() != 4:
+        return False
+    # No MQA/GQA: Q, K and V must agree on head count (dim 1) and head_dim
+    # (dim 3), and K/V must agree on sequence length (dim 2).
+    if not (query.shape[1] == key.shape[1] == value.shape[1]):
+        return False
+    if not (query.shape[3] == key.shape[3] == value.shape[3]):
+        return False
+    if key.shape[2] != value.shape[2]:
+        return False
+    if query.shape[0] != key.shape[0] or query.shape[0] != value.shape[0]:
         return False
     if is_causal and query.shape[2] != key.shape[2]:
         return False
@@ -1378,7 +1869,7 @@ def _patched_sdpa_flash_attn_rocwmma(query, key, value, attn_mask=None, dropout_
                                              dropout_p=dropout_p, is_causal=is_causal,
                                              scale=scale, **kwargs)
 
-    if not _is_flash_attn_rocwmma_eligible(query, key, attn_mask, dropout_p, is_causal):
+    if not _is_flash_attn_rocwmma_eligible(query, key, value, attn_mask, dropout_p, is_causal):
         return _fallback()
 
     def _try_flash_rocwmma():
@@ -1425,9 +1916,11 @@ def _patched_sdpa_flash_attn_rocwmma(query, key, value, attn_mask=None, dropout_
 
 
 def enable_flash_attn_rocwmma() -> None:
-    """Called automatically at import time (see the
-    AMD_TUNED_TORCH_FLASH_ATTN_ROCWMMA trigger at the bottom of this
-    file; set it to "0" to opt out). Tries flash_attn_rocwmma_ops's
+    """OPT-IN, and not recommended -- set
+    AMD_TUNED_TORCH_FLASH_ATTN_ROCWMMA=1 to install it (it used to be
+    default-on; see the trigger at the bottom of this file, and the
+    measurements below, for why it no longer is). Tries
+    flash_attn_rocwmma_ops's
     vendored rocWMMA FlashAttention-2 kernel first for eligible calls
     (see _is_flash_attn_rocwmma_eligible: no attn_mask, no dropout, 4D
     query/key/value, causal only when query_len == key_len), falling back
@@ -1435,26 +1928,59 @@ def enable_flash_attn_rocwmma() -> None:
     TE-patched if the main enable() already ran -- for anything else, if
     the kernel isn't available, or if it raises.
 
-    Being default-on does NOT mean this has been validated -- it still
-    has not, on any hardware this project has access to. Before trusting
-    output from this path on your actual RX 7900 XTX:
-      1. Confirm the JIT build actually succeeded:
-         `amd_tuned_torch.flash_attn_rocwmma_ops.available()`. If it
-         didn't, this function already no-ops with a warning (see the
-         `if not flash_attn_rocwmma_ops.available()` branch below) and
-         F.scaled_dot_product_attention is untouched -- this kernel's own
-         upstream project (see
-         amd_tuned_torch/_vendor/rocwmma_fattn/NOTICE.md) was only ever
-         benchmarked on Windows+ZLUDA, so a clean build here is not a
-         given.
-      2. Compare its output against F.scaled_dot_product_attention
-         numerically (fp16 and bf16, causal and non-causal, query_len ==
-         key_len) -- nothing in this package has verified correctness,
-         and there's no tests_hardware/ coverage for attention yet (see
-         tests_hardware/test_conv_kernels.py for the shape of check to
-         add).
-      3. Benchmarking against stock/TE is no longer something you need to
-         do by hand: eligible calls now go through the same kernel_select
+    VALIDATED, and now correct but still slower. This docstring used to
+    say the backward was BROKEN, which it was: the checks below were first
+    run on a real RX 7900 XTX (gfx1100) via
+    tools/bench_flash_attn_rocwmma.py and step 4 failed outright. Six real
+    bugs in the vendored kernel were found and fixed as a result (dQ
+    missing the ln(2) rescale out of the exp2 domain, dQ accumulated
+    across workgroups that did not own it, dO read with the padded Q's
+    strides while never padded in its sequence dimension, bf16's infinite
+    mask sentinel turning fully-masked padded rows into NaN, guards
+    deleted by -ffinite-math-only, and gradients accumulated in half
+    precision) -- see _vendor/rocwmma_fattn/NOTICE.md for the itemised
+    list and each FIX comment in the .cu sources. Re-run results:
+
+      1. BUILD: fine. The JIT build succeeds and
+         flash_attn_rocwmma_ops.available() is True.
+      2. FORWARD NUMERICS: fine. Max error vs an fp32 reference is within
+         the benchmark's 8x-stock line on every shape, which is ordinary
+         for a different summation order in half precision.
+      3. FORWARD SPEED: still loses on every shape measured, 0.52x-1.00x
+         of stock across all 12. There is no shape where it wins, so the
+         kernel_select contest below can only ever pick the fallback.
+      4. BACKWARD NUMERICS: now fine. dQ/dK/dV max error vs fp32 is
+         5.2e-4 to 3.4e-2 against stock's 2.1e-4 to 1.9e-2 on the
+         identical shapes -- 1.2x to 3.8x stock, where it used to be three
+         orders of magnitude out. The benchmark's summary line is
+         "numerics: no shape exceeded 8x stock's own error vs the fp32
+         reference".
+      5. BACKWARD SPEED: loses, 0.35x-0.73x of stock. Part of that is the
+         fix for the dQ race: dQ now gets its own pass over the tile grid,
+         which costs one extra recomputation of Si and dPi per tile.
+
+    Beyond the benchmark, the kernel is checked by
+    tools/ (see the scratch test harness referenced in
+    flash_attn_rocwmma_ops.py's docstring): 56 shape/dtype/causal
+    combinations forward and backward, plus a determinism sweep (144
+    combinations x 5 repeats, bitwise identical) and a clean run under
+    AMD_SERIALIZE_KERNEL=3 with HIP_LAUNCH_BLOCKING=1.
+
+    So: it is no longer unsafe, but it is still not faster. Turn it on to
+    work on it, or if you specifically want this code path; there is
+    currently no performance reason to prefer it over stock.
+
+    Separately, and now fixed in _is_flash_attn_rocwmma_eligible: the
+    kernel has no MQA/GQA support and used to accept those shapes, reading
+    past the end of K/V and intermittently trapping as "HIP error: an
+    illegal memory access was encountered".
+
+    So: do not turn this on to use it. Turn it on only to work on it --
+    fixing the backward is the prerequisite for this tier being worth
+    anything, and step 4 above is the test to fix it against.
+
+    Benchmarking against stock/TE is not something you need to do by hand:
+    eligible calls go through the same kernel_select
          contest linear/bmm/conv2d/conv3d/group_norm already use (see
          _patched_sdpa_flash_attn_rocwmma) -- the first call for each
          distinct (dtype, Q/K/V shape, is_causal) measures this kernel
@@ -1720,13 +2246,28 @@ if os.environ.get("AMD_TUNED_TORCH_AUTOPATCH", "1") != "0":
     # opt-out on top of AUTOPATCH, for a user who wants the GEMM/conv/norm
     # tiers auto-installed but not these two specifically.
     #
-    # Default ON: see the "FlashAttention (rocWMMA)" section above for why
-    # an UNVALIDATED kernel gets this treatment (short version:
-    # enable_flash_attn_rocwmma() already degrades to a warning + no-op on
-    # any build/eligibility failure, so default-on costs nothing on a
-    # machine where it doesn't work). Set AMD_TUNED_TORCH_FLASH_ATTN_ROCWMMA=0
-    # to opt out.
-    if os.environ.get("AMD_TUNED_TORCH_FLASH_ATTN_ROCWMMA", "1") != "0":
+    # Default OFF. This was default-ON, on the reasoning that
+    # enable_flash_attn_rocwmma() degrades to a warning + no-op whenever the
+    # kernel does not work, so default-on "costs nothing on a machine where
+    # it doesn't work". That reasoning assumed the only failure mode was the
+    # kernel being ABSENT or failing to build. It has now been run on the
+    # hardware it was written for (gfx1100 / RX 7900 XTX) via
+    # tools/bench_flash_attn_rocwmma.py, and it is present, builds, runs --
+    # and is wrong:
+    #
+    #   * BACKWARD is numerically broken. dQ/dK/dV max error against an fp32
+    #     reference is 1e-1 to 2.9 across all 12 benchmarked shapes, where
+    #     stock's error on the same shapes is 1e-4 to 2e-2. An absolute
+    #     gradient error of 2.4 is not precision noise; training on it
+    #     silently produces a different model.
+    #   * FORWARD is numerically fine but SLOWER than stock on every shape
+    #     measured -- 0.36x to 0.71x. There is no shape where it wins.
+    #
+    # So the kernel degrades neither loudly nor safely: it returns wrong
+    # gradients at a speed nobody wanted. A tier that can only lose does not
+    # belong on by default. Set AMD_TUNED_TORCH_FLASH_ATTN_ROCWMMA=1 to opt
+    # in anyway (e.g. to re-measure it after fixing the backward).
+    if os.environ.get("AMD_TUNED_TORCH_FLASH_ATTN_ROCWMMA", "0") == "1":
         enable_flash_attn_rocwmma()
 
     # Default ON for the same reason as flash_attn_rocwmma above: no-ops

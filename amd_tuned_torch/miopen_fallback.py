@@ -96,6 +96,79 @@ extension to be built and importable
 (`pip install -e source/kernel/causal-conv1d-amd`) -- silently skipped
 (falls through to the MIOpen path below) if it isn't.
 
+FFTCONV1D FAST PATH
+--------------------
+Tried next, for any conv1d call the causal fast path above didn't already
+claim: fftconv_ops.fftconv1d_candidate (amd_tuned_torch/fftconv_ops.py) is
+contested against stock conv1d through amd_tuned_torch.kernel_select.pick --
+the same measure-once-then-cache-the-winner policy already used for
+conv2d/conv3d/linear/bmm/attention (see kernel_select.py's own module
+docstring), rather than trusting fftconv_ops's own hardcoded kernel-width
+guess outright. This decides, per (dtype, shape, stride, padding,
+dilation), whether FFT-conv's O(N log N) cost actually beats direct
+convolution's O(N*K) on THIS card for THIS shape -- the long-kernel/
+global-convolution regime this project's native/CK conv tiers (tuned for
+3x3-style small kernels) and MIOpen's own Winograd solvers don't cover,
+the same use case (Hyena/long-conv blocks) `source/flash-fft-conv` targets
+with a tensor-core-only implementation this project couldn't port (see
+fftconv_ops.py's module docstring). The contest passes a looser-than-
+kernel_select's-default verification tolerance (fftconv_ops.fftconv_tolerance)
+since FFT-based and direct convolution accumulate rounding differently --
+see that function's docstring. Unlike the sparse fast path just below, no
+_grad_safe check is needed here: fft_conv's entire computation is ordinary
+differentiable PyTorch with a real backward pass, so this stays active
+during training too. On by default; AMD_TUNED_TORCH_FFTCONV1D=0 disables it
+independently of this module's own AMD_TUNED_TORCH_MIOPEN_CONV1D_FALLBACK
+gate (and of AMD_TUNED_TORCH_MEASURE_KERNELS, kernel_select's own master
+switch, which independently disables the underlying contest mechanism for
+every kernel_select-gated tier in this package, not just this one).
+
+DEPTHWISE CONV1D FAST PATH
+--------------------------
+Folded into the SAME contest as the FFTCONV1D fast path above (see
+_try_fftconv1d_fastpath's own docstring for exactly how), not a separate
+sequential try: depthwise_conv1d_ops.depthwise_conv1d_candidate
+(amd_tuned_torch/depthwise_conv1d_ops.py, backed by a HIP kernel vendored
+from FlashFFTConv independently of third_party/FlashFFTConv/ itself -- see
+that module's docstring) is entered into kernel_select's contest whenever
+the call is depthwise (groups == in_channels == out_channels) with an odd
+kernel width and stride == dilation == 1
+(_is_depthwise_conv1d_eligible). Broader than the CAUSAL_CONV1D fast path
+above -- any odd width and any symmetric padding, not just width in [2, 4]
+with padding == width - 1 -- and, unlike that fast path, its output matches
+stock conv1d's formula exactly rather than needing a truncation caveat, so
+it's contested for real instead of pattern-matched in unconditionally. Has
+a real backward pass, so stays active during training too.
+
+SPARSE CONV1D FAST PATH
+------------------------
+Tried next, for any groups=1, grad-safe conv1d call neither fast path
+above already claimed: flexgemm_ops.maybe_sparse_conv1d
+(amd_tuned_torch/flexgemm_ops.py) estimates `input`'s occupancy and, only
+when it's mostly empty, routes through flex_gemm's sparse convolution (a
+real ROCm/HIP kernel when third_party/FlexGEMM is installed, via the same
+"1D conv is a 3D conv with two spatial axes of size 1" lift
+sparse_conv2d_native already uses to reuse the same kernel -- see that
+module's docstring; a pure-PyTorch fallback otherwise, so this always
+produces a result on CPU too). Content-dependent, so it's checked on
+every eligible call rather than cached by shape -- see
+maybe_sparse_conv1d's own docstring. On by default;
+AMD_TUNED_TORCH_SPARSE_CONV1D=0 disables it independently of this module's own
+AMD_TUNED_TORCH_MIOPEN_CONV1D_FALLBACK gate.
+
+GRAD-SAFETY. flexgemm_ops's sparse conv path has no backward pass, so
+_try_sparse_conv1d_fastpath checks _grad_safe(input, weight, bias) (same
+semantics as amd_tuned_torch.__init__._grad_safe, duplicated here to avoid
+a circular import) before ever calling it -- during training, this fast
+path is skipped entirely and the call falls through to the causal-conv1d/
+MIOpen path below, same as every other non-autograd tier elsewhere in this
+package. This check was ABSENT when the fast path was first wired in: a
+grad-tracked call would have silently returned a tensor with a real
+gradient for this layer's weight/bias but a permanently zero gradient for
+everything upstream, since sparse_conv1d_from_dense extracts `input`
+via `.detach()` internally. Fixed by adding the check above -- see
+_grad_safe's own docstring for the full failure mode this closes.
+
 Usage:
 
     import amd_tuned_torch
@@ -116,6 +189,11 @@ from typing import Any, Callable, Optional
 
 import torch
 
+from . import depthwise_conv1d_ops
+from . import fftconv_ops
+from . import flexgemm_ops
+from . import kernel_select
+
 try:
     from causal_conv1d import causal_conv1d_fn as _causal_conv1d_fn
 
@@ -127,6 +205,45 @@ except ImportError:
 
 def _env_flag(name: str, default: str = "0") -> bool:
     return os.environ.get(name, default).strip().lower() not in ("0", "", "false", "no", "off")
+
+
+# Resolved once, same reasoning as amd_tuned_torch.__init__._HAS_INFERENCE_MODE:
+# _grad_safe runs on every eligible conv1d call, so a hasattr() lookup on
+# the torch module there for the life of the process is pure waste.
+_HAS_INFERENCE_MODE = hasattr(torch, "is_inference_mode_enabled")
+
+
+def _grad_safe(*tensors: Any) -> bool:
+    """Same semantics as amd_tuned_torch.__init__._grad_safe -- duplicated
+    rather than imported (this module is imported BY
+    amd_tuned_torch/__init__.py, not the other way around, so importing it
+    back would be circular; also keeps this module independently droppable,
+    same posture as flexgemm_ops._env_flag not importing this module's).
+
+    WHY THIS EXISTS -- A REAL BUG THIS CLOSES. _try_sparse_conv1d_fastpath
+    below routes to flexgemm_ops.maybe_sparse_conv1d, which has NO backward
+    pass (see flexgemm_ops.sparse_conv1d_from_dense's own docstring: "No
+    autograd support -- caller must ensure grad-safety first"). Without
+    this check, calling it during training would not raise or fall back --
+    sparse_conv1d_from_dense extracts its working copy of `input` via
+    `input.detach()` internally, but leaves `weight`/`bias` un-detached in
+    its own matmul/bias-add, so the tensor it returns has requires_grad
+    reflecting `weight`/`bias` but NOT `input`. backward() would then run
+    to completion, produce a real (correct) gradient for this layer's own
+    weight/bias, and silently propagate a ZERO gradient to every layer
+    upstream of this conv1d call -- a partially-broken backward pass with
+    no visible error. This is exactly the failure mode _grad_safe already
+    prevents for every other non-autograd tier in this package (aiter's
+    conv2d/matmul, the native HIP kernels) -- conv1d's sparse fast path
+    was simply missing the same guard when it was wired in."""
+    if _HAS_INFERENCE_MODE and torch.is_inference_mode_enabled():
+        return True
+    if not torch.is_grad_enabled():
+        return True
+    for t in tensors:
+        if isinstance(t, torch.Tensor) and t.requires_grad:
+            return False
+    return True
 
 
 def causal_conv1d_available() -> bool:
@@ -179,6 +296,123 @@ def _try_causal_conv1d_fastpath(
         return None
 
 
+def _is_depthwise_conv1d_eligible(
+    input: torch.Tensor, weight: torch.Tensor, stride: Any, dilation: Any, groups: int,
+) -> bool:
+    """True if this is a depthwise Conv1d (groups == in_channels ==
+    out_channels, one input channel per group) with an odd kernel width
+    and stride == dilation == 1 -- the exact shape
+    depthwise_conv1d_ops.depthwise_conv1d_candidate's vendored kernel
+    supports (see conv1d.h's `TORCH_CHECK(k % 2 == 1, ...)` and the fact
+    that its forward signature has no stride/dilation parameters at all).
+    Broader than _is_causal_conv1d_eligible (any odd width and any
+    symmetric padding value, not just width in [2, 4] with
+    padding == width - 1) -- see depthwise_conv1d_ops's module docstring
+    for how the two fast paths' scopes relate."""
+    if not (input.is_cuda and input.dim() == 3 and weight.dim() == 3):
+        return False
+    dim = input.shape[1]
+    out_channels, in_channels_per_group, width = weight.shape
+    if groups != dim or out_channels != dim or in_channels_per_group != 1:
+        return False
+    if width % 2 != 1:
+        return False
+    return _scalar(stride) == 1 and _scalar(dilation) == 1
+
+
+def _try_fftconv1d_fastpath(
+    input: torch.Tensor, weight: torch.Tensor, bias: Optional[torch.Tensor],
+    stride: Any, padding: Any, dilation: Any, groups: int,
+    orig_fn: Callable[..., torch.Tensor],
+) -> Optional[torch.Tensor]:
+    """Large-kernel fast path, tried before MIOpen (and before the sparse
+    fast path below, so a large AND sparse kernel prefers whichever of
+    fftconv/stock wins the contest here -- sparse_conv1d's per-kernel-
+    position gather loop scales with kernel width, exactly the regime this
+    path exists to avoid): contests fftconv_ops.fftconv1d_candidate against
+    `orig_fn` (stock conv1d) through amd_tuned_torch.kernel_select.pick,
+    the same measure-once-then-cache-the-winner policy conv2d/conv3d/
+    linear/bmm/attention already use (see kernel_select.py's own module
+    docstring) -- rather than trusting fftconv_ops's own hardcoded
+    kernel-width guess (`maybe_fft_conv1d`) outright. `tolerance` overrides
+    kernel_select's default per-dtype verification bar with one calibrated
+    for an FFT-vs-direct-conv contest specifically (see
+    fftconv_ops.fftconv_tolerance's docstring for why the shared default is
+    too strict here). Unlike the sparse fast path, no _grad_safe check is
+    needed -- fft_conv has a real, correct backward pass (see
+    fftconv_ops.fft_conv's own docstring), so this stays active under
+    training too. `stock` is listed last (kernel_select's convention for
+    "the reference, assumed to always work") so a shape kernel_select can't
+    time at all (AMD_TUNED_TORCH_MEASURE_KERNELS=0) or where fftconv declines
+    still gets a real conv1d result rather than None. AMD_TUNED_TORCH_FFTCONV1D=0
+    disables the fftconv candidate entirely (contest never built, `orig_fn`
+    called directly by the caller as before) independently of this
+    module's own AMD_TUNED_TORCH_MIOPEN_CONV1D_FALLBACK gate.
+
+    When the call is ALSO depthwise-eligible (see
+    _is_depthwise_conv1d_eligible) and depthwise_conv1d_ops is available, a
+    third candidate ("depthwise") is folded into the SAME contest --
+    deliberately one kernel_select.pick call with up to three candidates
+    rather than two sequential 2-way contests, so a depthwise+large-kernel
+    shape picks the genuine fastest of {fftconv, depthwise-direct, stock}
+    instead of whichever fast path happened to run first permanently
+    winning the shape. depthwise-direct's own output matches stock's
+    formula exactly (unlike fftconv's), so reusing fftconv's looser
+    tolerance for it is safe -- a looser bar only ever accepts a *correct*
+    candidate more readily, never incorrectly accepts a wrong one, since
+    kernel_select's tolerance is strictly a floor for acceptance, not
+    per-candidate. If fftconv is disabled but depthwise is eligible, the
+    contest still runs with just {depthwise, stock} -- this function is
+    the entry point for both, not just fftconv, despite the name (kept
+    to avoid a wider rename touching every existing test)."""
+    depthwise_eligible = (
+        depthwise_conv1d_ops.available()
+        and _is_depthwise_conv1d_eligible(input, weight, stride, dilation, groups)
+    )
+    if not fftconv_ops.fft_conv1d_enabled() and not depthwise_eligible:
+        return None
+    s, p, d = _scalar(stride), _scalar(padding), _scalar(dilation)
+    candidates = []
+    if fftconv_ops.fft_conv1d_enabled():
+        candidates.append(
+            ("fftconv", lambda: fftconv_ops.fftconv1d_candidate(input, weight, bias, s, p, d, groups)))
+    if depthwise_eligible:
+        candidates.append(
+            ("depthwise", lambda: depthwise_conv1d_ops.depthwise_conv1d_candidate(
+                input, weight, bias, stride, padding, dilation, groups)))
+    candidates.append(("stock", lambda: orig_fn(input, weight, bias, stride, padding, dilation, groups)))
+    return kernel_select.pick("conv1d", input, weight, stride, padding, dilation, candidates,
+                               tolerance=fftconv_ops.fftconv_tolerance(input.dtype))
+
+
+def _try_sparse_conv1d_fastpath(
+    input: torch.Tensor, weight: torch.Tensor, bias: Optional[torch.Tensor],
+    stride: Any, padding: Any, dilation: Any, groups: int,
+) -> Optional[torch.Tensor]:
+    """Sparse-pixel fast path, tried before MIOpen for any groups=1,
+    grad-safe conv1d call -- flexgemm_ops.maybe_sparse_conv1d only
+    actually engages (rather than declining back to None) when `input` is
+    mostly empty, per its own occupancy-threshold design
+    (AMD_TUNED_TORCH_SPARSE_CONV1D=0 to disable entirely; see
+    flexgemm_ops.py's module docstring for the full design shared with the
+    conv2d/conv3d versions). groups!=1 is out of scope -- flexgemm_ops.
+    sparse_conv1d has no notion of grouped convolution, unlike the
+    depthwise-only causal fast path above (the one grouped case this
+    module handles). Works on CPU as well as ROCm (the pure-Python
+    fallback inside maybe_sparse_conv1d has no device requirement), same
+    as this module's other checks not gating on input.is_cuda before the
+    MIOpen-specific retry logic further down.
+
+    The _grad_safe check is REQUIRED, not defensive: flexgemm_ops's sparse
+    conv path has no backward pass at all -- see _grad_safe's own
+    docstring above for exactly what silently breaks without this check."""
+    if groups != 1 or not _grad_safe(input, weight, bias):
+        return None
+    return flexgemm_ops.maybe_sparse_conv1d(
+        input, weight, bias, stride=(_scalar(stride),), padding=(_scalar(padding),),
+        dilation=(_scalar(dilation),))
+
+
 def _miopen_safe_conv(op_name: str, orig_fn: Callable[..., torch.Tensor]) -> Callable[..., torch.Tensor]:
     """Build a MIOpen-failure-tolerant wrapper around a torch.nn.functional
     convN op. See the module docstring for the retry-then-CPU-fallback
@@ -189,6 +423,12 @@ def _miopen_safe_conv(op_name: str, orig_fn: Callable[..., torch.Tensor]) -> Cal
         fast = _try_causal_conv1d_fastpath(input, weight, bias, stride, padding, dilation, groups)
         if fast is not None:
             return fast
+        fftconv = _try_fftconv1d_fastpath(input, weight, bias, stride, padding, dilation, groups, orig_fn)
+        if fftconv is not None:
+            return fftconv
+        sparse = _try_sparse_conv1d_fastpath(input, weight, bias, stride, padding, dilation, groups)
+        if sparse is not None:
+            return sparse
         try:
             return orig_fn(input, weight, bias, stride, padding, dilation, groups)
         except RuntimeError as e:

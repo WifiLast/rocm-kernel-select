@@ -65,6 +65,37 @@ builds without torch.library.custom_op (added in PyTorch 2.4). Either way,
 amd_tuned_torch.compile_ops.linear_fp16/bmm_fp16/conv2d_fp16/group_norm/
 conv2d_native/conv3d_native/linear_int8 are always safe to call -- callers
 never need to know which path is active underneath.
+
+hipblaslt_linear/ck_gemm_linear/hipblaslt_bmm (added later, same idea
+applied to amd_tuned_torch.hipblaslt_ops.linear/amd_tuned_torch.ck_gemm_ops.linear/
+amd_tuned_torch.hipblaslt_ops.bmm -- the GEMM contest candidates
+_patched_linear/_patched_bmm/_patched_matmul call directly once
+kernel_select has already picked a winner for a shape, the same
+monkeypatched-op hot path reasoning as every op above) needed one more
+piece the seven above didn't: those three can legitimately return None
+(the installed navi31 logic has no kernel for some dtype/epilogue/shape
+combination -- see hipblaslt_ops.py's own docstring), where every op above
+always succeeds once called. torch.library.infer_schema has no mapping for
+a bare `Optional[torch.Tensor]` return annotation (raises ValueError,
+confirmed empirically against this PyTorch version), so these three pass
+an explicit `schema=".. -> Tensor?"` string instead of relying on
+inference -- PyTorch's schema language itself supports an optional Tensor
+return perfectly well, it is only the Python-type-annotation-based
+inference path that doesn't. Each op's register_fake replicates the same
+call's own eligibility check (hipblaslt_ops.is_linear_eligible/
+is_bmm_eligible, ck_gemm_ops.is_eligible -- pulled out of linear/bmm into
+their own functions specifically so the fake can reuse them verbatim
+instead of duplicating the logic) to decide whether the fake should return
+a shaped stand-in or None too; every one of those checks is static tensor
+metadata (dtype/dim/is_cuda/shape), so it is exactly as valid to evaluate
+under FakeTensorMode as for real. What the fake CANNOT replicate is a
+decline made only inside the native call itself (an installed navi31 logic
+gap for one specific shape/dtype/epilogue combination) -- in practice this
+doesn't bite the compiled hot path: kernel_select only ever calls one of
+these three directly, without going through kernel_select.pick's contest
+again, for a (dtype, shape) key that has ALREADY been measured to succeed
+with that exact candidate, and kernel selection inside hipBLASLt/CK is
+itself shape/dtype-deterministic, so a key that won once keeps winning.
 """
 from __future__ import annotations
 
@@ -73,6 +104,8 @@ from typing import Optional
 import torch
 
 from . import aiter_ops
+from . import ck_gemm_ops
+from . import hipblaslt_ops
 from . import _native as _C
 
 _HAS_CUSTOM_OP = hasattr(torch.library, "custom_op")
@@ -216,6 +249,52 @@ if _HAS_CUSTOM_OP and not _already_registered("linear_fp16"):
         del bias
         return input_.new_empty(*input_.shape[:-1], weight.shape[0])
 
+    @torch.library.custom_op(
+        "amd_tuned_torch::hipblaslt_linear", mutates_args=(),
+        schema="(Tensor input, Tensor weight, Tensor? bias, int epilogue) -> Tensor?")
+    def _hipblaslt_linear_op(
+        input_: torch.Tensor, weight: torch.Tensor, bias: Optional[torch.Tensor], epilogue: int,
+    ) -> Optional[torch.Tensor]:
+        return hipblaslt_ops.linear(input_, weight, bias, epilogue)
+
+    @_hipblaslt_linear_op.register_fake
+    def _hipblaslt_linear_fake(
+        input_: torch.Tensor, weight: torch.Tensor, bias: Optional[torch.Tensor], epilogue: int,
+    ) -> Optional[torch.Tensor]:
+        del epilogue
+        if not hipblaslt_ops.is_linear_eligible(input_, weight, bias):
+            return None
+        return input_.new_empty(*input_.shape[:-1], weight.shape[0])
+
+    @torch.library.custom_op(
+        "amd_tuned_torch::ck_gemm_linear", mutates_args=(),
+        schema="(Tensor input, Tensor weight, Tensor? bias, int epilogue) -> Tensor?")
+    def _ck_gemm_linear_op(
+        input_: torch.Tensor, weight: torch.Tensor, bias: Optional[torch.Tensor], epilogue: int,
+    ) -> Optional[torch.Tensor]:
+        return ck_gemm_ops.linear(input_, weight, bias, epilogue)
+
+    @_ck_gemm_linear_op.register_fake
+    def _ck_gemm_linear_fake(
+        input_: torch.Tensor, weight: torch.Tensor, bias: Optional[torch.Tensor], epilogue: int,
+    ) -> Optional[torch.Tensor]:
+        del epilogue
+        if not ck_gemm_ops.is_eligible(input_, weight, bias):
+            return None
+        return input_.new_empty(*input_.shape[:-1], weight.shape[0])
+
+    @torch.library.custom_op(
+        "amd_tuned_torch::hipblaslt_bmm", mutates_args=(),
+        schema="(Tensor input, Tensor mat2) -> Tensor?")
+    def _hipblaslt_bmm_op(input_: torch.Tensor, mat2: torch.Tensor) -> Optional[torch.Tensor]:
+        return hipblaslt_ops.bmm(input_, mat2)
+
+    @_hipblaslt_bmm_op.register_fake
+    def _hipblaslt_bmm_fake(input_: torch.Tensor, mat2: torch.Tensor) -> Optional[torch.Tensor]:
+        if not hipblaslt_ops.is_bmm_eligible(input_, mat2):
+            return None
+        return input_.new_empty(input_.shape[0], input_.shape[1], mat2.shape[-1])
+
     _linear_fp16_impl = torch.ops.amd_tuned_torch.linear_fp16
     _bmm_fp16_impl = torch.ops.amd_tuned_torch.bmm_fp16
     _conv2d_fp16_impl = torch.ops.amd_tuned_torch.conv2d_fp16
@@ -223,6 +302,9 @@ if _HAS_CUSTOM_OP and not _already_registered("linear_fp16"):
     _conv2d_native_impl = torch.ops.amd_tuned_torch.conv2d_native
     _conv3d_native_impl = torch.ops.amd_tuned_torch.conv3d_native
     _linear_int8_impl = torch.ops.amd_tuned_torch.linear_int8
+    _hipblaslt_linear_impl = torch.ops.amd_tuned_torch.hipblaslt_linear
+    _ck_gemm_linear_impl = torch.ops.amd_tuned_torch.ck_gemm_linear
+    _hipblaslt_bmm_impl = torch.ops.amd_tuned_torch.hipblaslt_bmm
 
 elif _already_registered("linear_fp16"):
     # Already registered by an earlier import of this module in this
@@ -235,6 +317,9 @@ elif _already_registered("linear_fp16"):
     _conv2d_native_impl = torch.ops.amd_tuned_torch.conv2d_native
     _conv3d_native_impl = torch.ops.amd_tuned_torch.conv3d_native
     _linear_int8_impl = torch.ops.amd_tuned_torch.linear_int8
+    _hipblaslt_linear_impl = torch.ops.amd_tuned_torch.hipblaslt_linear
+    _ck_gemm_linear_impl = torch.ops.amd_tuned_torch.ck_gemm_linear
+    _hipblaslt_bmm_impl = torch.ops.amd_tuned_torch.hipblaslt_bmm
 
 else:
     # PyTorch build predates torch.library.custom_op (added in 2.4) --
@@ -246,6 +331,9 @@ else:
     _conv2d_native_impl = _C.conv2d
     _conv3d_native_impl = _C.conv3d
     _linear_int8_impl = aiter_ops.linear_int8
+    _hipblaslt_linear_impl = hipblaslt_ops.linear
+    _ck_gemm_linear_impl = ck_gemm_ops.linear
+    _hipblaslt_bmm_impl = hipblaslt_ops.bmm
 
 
 def linear_fp16(
@@ -362,3 +450,27 @@ def linear_int8(
     input_: torch.Tensor, weight: torch.Tensor, bias: Optional[torch.Tensor] = None
 ) -> torch.Tensor:
     return _linear_int8_impl(input_, weight, bias)
+
+
+def hipblaslt_linear(
+    input_: torch.Tensor, weight: torch.Tensor, bias: Optional[torch.Tensor] = None,
+    epilogue: int = hipblaslt_ops.EPILOGUE_NONE,
+) -> Optional[torch.Tensor]:
+    """Compile-safe wrapper for hipblaslt_ops.linear -- see this module's
+    docstring for why it (unlike every op above) can return None."""
+    return _hipblaslt_linear_impl(input_, weight, bias, int(epilogue))
+
+
+def ck_gemm_linear(
+    input_: torch.Tensor, weight: torch.Tensor, bias: Optional[torch.Tensor] = None,
+    epilogue: int = hipblaslt_ops.EPILOGUE_NONE,
+) -> Optional[torch.Tensor]:
+    """Compile-safe wrapper for ck_gemm_ops.linear -- see this module's
+    docstring for why it (unlike every op above) can return None."""
+    return _ck_gemm_linear_impl(input_, weight, bias, int(epilogue))
+
+
+def hipblaslt_bmm(input_: torch.Tensor, mat2: torch.Tensor) -> Optional[torch.Tensor]:
+    """Compile-safe wrapper for hipblaslt_ops.bmm -- see this module's
+    docstring for why it (unlike every op above) can return None."""
+    return _hipblaslt_bmm_impl(input_, mat2)

@@ -22,7 +22,9 @@ import torch
 import torch.nn.functional as F
 
 import amd_tuned_torch.aiter_ops as aiter_ops
+import amd_tuned_torch.ck_gemm_ops as ck_gemm_ops
 import amd_tuned_torch.compile_ops as compile_ops
+import amd_tuned_torch.hipblaslt_ops as hipblaslt_ops
 
 pytestmark = pytest.mark.skipif(
     not compile_ops._HAS_CUSTOM_OP,
@@ -34,7 +36,8 @@ class TestRegistration:
     def test_ops_registered_under_amd_tuned_torch_namespace(self):
         assert hasattr(torch.ops, "amd_tuned_torch")
         for name in ("linear_fp16", "bmm_fp16", "conv2d_fp16", "group_norm",
-                     "conv2d_native", "conv3d_native"):
+                     "conv2d_native", "conv3d_native",
+                     "hipblaslt_linear", "ck_gemm_linear", "hipblaslt_bmm"):
             assert hasattr(torch.ops.amd_tuned_torch, name)
 
     def test_already_registered_guard_reflects_reality(self):
@@ -126,6 +129,78 @@ class TestRegisterFakeShapes:
         assert out.shape == (1, 4, 4, 8, 8)
 
 
+class TestOptionalReturnFakeShapes:
+    """hipblaslt_linear/ck_gemm_linear/hipblaslt_bmm are the only ops here
+    that can legitimately return None -- see compile_ops.py's own docstring
+    for why they need an explicit `schema=".. -> Tensor?"` string rather
+    than relying on infer_schema, and why their fakes replicate
+    hipblaslt_ops.is_linear_eligible/is_bmm_eligible and
+    ck_gemm_ops.is_eligible exactly (pulled into their own functions
+    specifically for this reuse)."""
+
+    def test_hipblaslt_linear_fake_shape_when_eligible(self, monkeypatch):
+        monkeypatch.setattr(hipblaslt_ops, "is_linear_eligible", lambda *a, **k: True)
+        from torch._subclasses.fake_tensor import FakeTensorMode
+
+        with FakeTensorMode():
+            x = torch.randn(2, 4)
+            w = torch.randn(3, 4)
+            out = torch.ops.amd_tuned_torch.hipblaslt_linear(x, w, None, 0)
+        assert out.shape == (2, 3)
+        assert out.dtype == x.dtype
+
+    def test_hipblaslt_linear_fake_none_when_ineligible(self):
+        # is_linear_eligible not patched -- conftest.py's global
+        # has_hipblaslt()=False stub makes available() (and therefore
+        # is_linear_eligible) False by default.
+        from torch._subclasses.fake_tensor import FakeTensorMode
+
+        with FakeTensorMode():
+            x = torch.randn(2, 4)
+            w = torch.randn(3, 4)
+            out = torch.ops.amd_tuned_torch.hipblaslt_linear(x, w, None, 0)
+        assert out is None
+
+    def test_ck_gemm_linear_fake_shape_when_eligible(self, monkeypatch):
+        monkeypatch.setattr(ck_gemm_ops, "is_eligible", lambda *a, **k: True)
+        from torch._subclasses.fake_tensor import FakeTensorMode
+
+        with FakeTensorMode():
+            x = torch.randn(2, 4)
+            w = torch.randn(3, 4)
+            out = torch.ops.amd_tuned_torch.ck_gemm_linear(x, w, None, 0)
+        assert out.shape == (2, 3)
+        assert out.dtype == x.dtype
+
+    def test_ck_gemm_linear_fake_none_when_ineligible(self):
+        from torch._subclasses.fake_tensor import FakeTensorMode
+
+        with FakeTensorMode():
+            x = torch.randn(2, 4)
+            w = torch.randn(3, 4)
+            out = torch.ops.amd_tuned_torch.ck_gemm_linear(x, w, None, 0)
+        assert out is None
+
+    def test_hipblaslt_bmm_fake_shape_when_eligible(self, monkeypatch):
+        monkeypatch.setattr(hipblaslt_ops, "is_bmm_eligible", lambda *a, **k: True)
+        from torch._subclasses.fake_tensor import FakeTensorMode
+
+        with FakeTensorMode():
+            x = torch.randn(5, 2, 4)
+            y = torch.randn(5, 4, 3)
+            out = torch.ops.amd_tuned_torch.hipblaslt_bmm(x, y)
+        assert out.shape == (5, 2, 3)
+
+    def test_hipblaslt_bmm_fake_none_when_ineligible(self):
+        from torch._subclasses.fake_tensor import FakeTensorMode
+
+        with FakeTensorMode():
+            x = torch.randn(5, 2, 4)
+            y = torch.randn(5, 4, 3)
+            out = torch.ops.amd_tuned_torch.hipblaslt_bmm(x, y)
+        assert out is None
+
+
 class TestDispatchCorrectness:
     """compile_ops.* must actually call through to aiter_ops/the native
     extension, same as calling them directly -- registering as a custom op
@@ -195,6 +270,41 @@ class TestDispatchCorrectness:
         out = compile_ops.conv3d_native(x, w, None, stride=1, padding=1, dilation=1)
         assert torch.equal(out, expected)
         fake.assert_called_once_with(x, w, None, [1, 1, 1], [1, 1, 1], [1, 1, 1])
+
+    def test_hipblaslt_linear_dispatches_to_hipblaslt_ops(self, monkeypatch):
+        x = torch.randn(2, 4)
+        w = torch.randn(3, 4)
+        expected = torch.zeros(2, 3)
+        fake = MagicMock(return_value=expected)
+        monkeypatch.setattr(hipblaslt_ops, "linear", fake)
+        out = compile_ops.hipblaslt_linear(x, w, None)
+        assert torch.equal(out, expected)
+        fake.assert_called_once_with(x, w, None, hipblaslt_ops.EPILOGUE_NONE)
+
+    def test_hipblaslt_linear_returns_none_when_hipblaslt_ops_declines(self, monkeypatch):
+        monkeypatch.setattr(hipblaslt_ops, "linear", MagicMock(return_value=None))
+        out = compile_ops.hipblaslt_linear(torch.randn(2, 4), torch.randn(3, 4), None)
+        assert out is None
+
+    def test_ck_gemm_linear_dispatches_to_ck_gemm_ops(self, monkeypatch):
+        x = torch.randn(2, 4)
+        w = torch.randn(3, 4)
+        expected = torch.zeros(2, 3)
+        fake = MagicMock(return_value=expected)
+        monkeypatch.setattr(ck_gemm_ops, "linear", fake)
+        out = compile_ops.ck_gemm_linear(x, w, None)
+        assert torch.equal(out, expected)
+        fake.assert_called_once_with(x, w, None, ck_gemm_ops.EPILOGUE_NONE)
+
+    def test_hipblaslt_bmm_dispatches_to_hipblaslt_ops(self, monkeypatch):
+        x = torch.randn(2, 3, 4)
+        y = torch.randn(2, 4, 5)
+        expected = torch.zeros(2, 3, 5)
+        fake = MagicMock(return_value=expected)
+        monkeypatch.setattr(hipblaslt_ops, "bmm", fake)
+        out = compile_ops.hipblaslt_bmm(x, y)
+        assert torch.equal(out, expected)
+        fake.assert_called_once_with(x, y)
 
 
 class TestTorchCompileFullGraph:
@@ -296,3 +406,20 @@ class TestTorchCompileFullGraph:
         assert torch.allclose(
             compiled(x, w, b), F.conv3d(x, w, b, stride=1, padding=1, dilation=1)
         )
+
+    def test_hipblaslt_linear_traces_under_fullgraph_compile(self, monkeypatch):
+        """The real point of the schema="..-> Tensor?" string: a genuine
+        Dynamo fullgraph trace, not just FakeTensorMode called by hand,
+        through an op whose fake sometimes legitimately returns None."""
+        monkeypatch.setattr(hipblaslt_ops, "is_linear_eligible", lambda *a, **k: True)
+        monkeypatch.setattr(
+            hipblaslt_ops, "linear",
+            lambda input_, weight, bias, epilogue: F.linear(input_, weight, bias),
+        )
+
+        def fn(x, w, b):
+            return compile_ops.hipblaslt_linear(x, w, b)
+
+        compiled = torch.compile(fn, backend="eager", fullgraph=True)
+        x, w, b = torch.randn(2, 4), torch.randn(3, 4), torch.randn(3)
+        assert torch.allclose(compiled(x, w, b), F.linear(x, w, b))

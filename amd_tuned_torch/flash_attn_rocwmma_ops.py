@@ -4,14 +4,25 @@ provenance and exactly what was changed from upstream) -- an alternative
 to te_ops.py's TransformerEngine-backed attention, for
 amd_tuned_torch.enable_flash_attn_rocwmma() to opt into.
 
-UNVALIDATED -- do not treat this as equivalent in trustworthiness to
-te_ops.py. The upstream kernel's own README and benchmark numbers are all
-Windows+ZLUDA; its Linux/ROCm code path (which this module uses) is real,
-un-platform-gated code, but there is no evidence upstream ever ran it, and
-nothing in this project has run or numerically verified it either (no
-ROCm hardware was available while writing this). See
-amd_tuned_torch.enable_flash_attn_rocwmma's docstring for what to check
-before trusting this.
+Numerically validated on gfx1100 (RX 7900 XTX, ROCm 7.2) as of
+2026-09-06: forward and backward, fp16 and bf16, causal and not, across
+56 shape combinations including sequence lengths and head dims that are
+not multiples of the Br=64 / Bc=128 / 32 tile sizes, each against an fp32
+reference and toleranced against a same-precision naive attention
+(flash-attention's own test criterion). Also checked for run-to-run
+determinism over 144 combinations x 5 repeats, and clean under
+AMD_SERIALIZE_KERNEL=3 with HIP_LAUNCH_BLOCKING=1.
+
+That validation found six real bugs in the vendored kernel, all now
+fixed and each marked with a FIX comment at its site -- see
+_vendor/rocwmma_fattn/NOTICE.md for the itemised list. Before it, the
+backward pass was wrong in every single configuration tested (dQ off by
+log2(e) everywhere, dK/dV NaN or garbage at any ragged shape), which is
+consistent with the upstream README's benchmark numbers all being
+Windows+ZLUDA forward-only and with no evidence upstream ever exercised
+the Linux/ROCm backward. Treat coverage outside the tested envelope
+(permute_NH=True in particular, which this module never sets) as still
+unvalidated.
 
 Unlike te_ops.py (gated behind AMD_TUNED_TORCH_ENABLE_TE, read once at
 *import* time, because a broken TE install can segfault the whole process
@@ -43,6 +54,44 @@ def _ensure_loaded() -> None:
     global _flash_attn_wmma, _load_error
     if _flash_attn_wmma is not None or _load_error is not None:
         return
+
+    # Prefer the ahead-of-time build, if setup.py made one. It is these
+    # same three sources with the same flags (setup.py keeps its nvcc list
+    # in sync with the extra_cuda_cflags below deliberately -- see the
+    # comment block there), just compiled at install time instead of
+    # costing whichever process touches attention first a ~4 minute hipcc
+    # run. required=False because every reason it can be absent is a
+    # perfectly ordinary one -- a checkout built before setup.py grew this
+    # tier, a build for a different torch version, or
+    # AMD_TUNED_TORCH_FLASH_ATTN_WMMA=0 -- and all of them should fall
+    # through to the JIT rather than surface as an error.
+    # AMD_TUNED_TORCH_FLASH_ATTN_JIT=1 skips the prebuilt module and forces
+    # the JIT path. Without it, editing the vendored .cu sources has no
+    # visible effect once a prebuilt tier exists: the loader below would keep
+    # returning the .so setup.py compiled, and the edit would look like it did
+    # nothing. That is exactly the loop anyone tuning these kernels is in.
+    _prebuilt = None
+    if os.environ.get("AMD_TUNED_TORCH_FLASH_ATTN_JIT", "0") != "1":
+        try:
+            from . import _native_loader
+            _prebuilt = _native_loader.load(
+                "amd_tuned_torch",
+                os.path.dirname(os.path.realpath(__file__)),
+                module_name="_native_flash_attn_wmma",
+                required=False,
+            )
+        except Exception:
+            # A broken/ABI-mismatched prebuilt .so must not be the end of the
+            # story: the JIT path below can still produce a working module,
+            # and it is the one that was always here. Deliberately not
+            # recorded in _load_error -- that is reserved for "no backend at
+            # all".
+            _prebuilt = None
+
+    if _prebuilt is not None:
+        _flash_attn_wmma = _prebuilt
+        return
+
     try:
         import torch.utils.cpp_extension
 
@@ -174,21 +223,47 @@ class _FlashAttentionRocwmmaFn(torch.autograd.Function):
         if D > 384:
             Br, Bc = 32, 128
 
+        # The device-wide synchronize()s that used to bracket this call are
+        # gone. They were added to contain an async fault whose reported site
+        # kept moving after each earlier fix -- the signature of a real
+        # out-of-bounds access, not of a stream-ordering problem. That access
+        # has since been found and fixed: backward_fp16/backward_bf16 read dO
+        # with the *padded* Q's strides while dO itself was only ever padded
+        # in its head dimension, never its sequence dimension (Nq_pad_sz is
+        # computed there from Q's already-padded n, so it is always 0). Any
+        # sequence length that is not a multiple of Br walked off the end of
+        # dO's storage and, for b/h > 0, indexed the wrong batch entirely. See
+        # the dO_Npad_sz FIX comment in either kernel .cu.
+        #
+        # Every launch already takes at::cuda::getCurrentCUDAStream(), so
+        # ordering against surrounding work is the stream's job, not a
+        # synchronize()'s -- and a device sync per attention call is a real
+        # cost in a step that makes many of them.
         o, q_bwd, k_bwd, v_bwd, o_bwd, L = _flash_attn_wmma.forward(
             q, k, v, Br, Bc, causal, scale, False
         )
 
         if q.requires_grad:
-            ctx.args = (causal, scale, N, Nkv, D)
+            # Br/Bc saved alongside N/Nkv/D so backward tiles with the exact
+            # same Br forward used (was hardcoded to 128 here regardless of
+            # forward's D-conditional 64/32 -- the same "forward and
+            # backward don't agree on a shape assumption" bug class as the
+            # K/V padding fix in kernel_fp16.cu/kernel_bf16.cu, just for the
+            # query-tile size instead of the KV-tile size. backward_fp16/
+            # backward_bf16 do re-derive and re-pad for their own Br, so a
+            # mismatch isn't a proven crash by itself, but there is no
+            # reason for it to exist and it's one less divergent assumption
+            # in a kernel already found to have two of these.
+            ctx.args = (causal, scale, N, Nkv, D, Br, Bc)
             ctx.save_for_backward(q_bwd, k_bwd, v_bwd, o_bwd, L)
         return o
 
     @staticmethod
     @torch.no_grad()
     def backward(ctx, do):
-        causal, scale, N, Nkv, D = ctx.args
+        causal, scale, N, Nkv, D, Br, Bc = ctx.args
         q, k, v, o, L = ctx.saved_tensors
-        Br, Bc = 128, 128
+        # No synchronize() here either; see forward() for why they went.
         dQ, dK, dV = _flash_attn_wmma.backward(
             q, k, v, o, do, L, N, Nkv, D, Br, Bc, causal, scale, False
         )

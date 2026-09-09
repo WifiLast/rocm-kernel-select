@@ -428,6 +428,28 @@ _RULES: "list[_Rule]" = [
             "once the profiling session is done."
         ),
     ),
+    _Rule(
+        name="sparse_conv_calibration_reset_left_on",
+        severity="warning",
+        predicate=lambda env, tiers: env.truthy("AMD_TUNED_TORCH_SPARSE_CONV_CALIBRATION_RESET"),
+        message=(
+            "AMD_TUNED_TORCH_SPARSE_CONV_CALIBRATION_RESET=1 is set. This makes "
+            "amd_tuned_torch.sparse_conv_calibration.load() ignore (and "
+            "delete) this GPU's saved sparse/dense conv1d/2d/3d crossover "
+            "calibration on every import -- meant as a one-shot 'go back to "
+            "the hardcoded defaults' action right before re-running "
+            "`python tools/benchmark_sparse_conv.py` (or `python setup.py "
+            "benchmark_sparse_conv`), not something to leave set. Left on in "
+            "a persistent environment (a shell profile, a container's env, a "
+            "systemd unit), it silently discards a real measured calibration "
+            "-- if one exists -- on every single process start with no "
+            "visible symptom beyond flexgemm_ops's sparse conv switches "
+            "quietly reverting to their unvalidated guesses "
+            "(AMD_TUNED_TORCH_SPARSE_CONV{1,2,3}D_MIN_POSITIONS default 4096, "
+            "_MAX_OCCUPANCY default 0.3). Unset it once the reset has taken "
+            "effect."
+        ),
+    ),
 ]
 
 

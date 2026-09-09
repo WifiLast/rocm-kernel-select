@@ -91,6 +91,26 @@ def _eligible(*tensors: Optional[torch.Tensor]) -> bool:
     return ref is not None
 
 
+def is_linear_eligible(input: torch.Tensor, weight: torch.Tensor,
+                        bias: Optional[torch.Tensor] = None) -> bool:
+    """Every shape/dtype/device check `linear` applies before ever calling
+    the native extension -- pulled out into its own function (rather than
+    inlined in `linear` the way it used to be) so
+    amd_tuned_torch.compile_ops's register_fake for this op can replicate
+    the exact same eligibility decision at trace time instead of
+    duplicating it by hand. Every check here (including `_eligible`'s own)
+    inspects only static tensor metadata (dtype/is_cuda/dim/shape) -- none
+    of it is data-dependent -- so it is exactly as valid to call on a
+    FakeTensor under torch.compile/FakeTensorMode as on a real one."""
+    if not available() or not _eligible(input, weight, bias):
+        return False
+    if input.dim() < 2 or weight.dim() != 2:
+        return False
+    if bias is not None and (bias.dim() != 1 or bias.size(0) != weight.size(0)):
+        return False
+    return True
+
+
 def linear(input: torch.Tensor, weight: torch.Tensor, bias: Optional[torch.Tensor] = None,
            epilogue: int = EPILOGUE_NONE) -> Optional[torch.Tensor]:
     """Y = X @ W^T (+ bias), `epilogue` fused. None if unavailable/unsupported.
@@ -103,11 +123,7 @@ def linear(input: torch.Tensor, weight: torch.Tensor, bias: Optional[torch.Tenso
     dtype/epilogue/shape combinations, and the caller is expected to have a
     stock fallback (see kernel_select.py's contest).
     """
-    if not available() or not _eligible(input, weight, bias):
-        return None
-    if input.dim() < 2 or weight.dim() != 2:
-        return None
-    if bias is not None and (bias.dim() != 1 or bias.size(0) != weight.size(0)):
+    if not is_linear_eligible(input, weight, bias):
         return None
     try:
         return _C.hipblaslt_linear(input, weight, bias, int(epilogue))
@@ -141,13 +157,20 @@ def linear_relu(input: torch.Tensor, weight: torch.Tensor,
     return linear(input, weight, bias, EPILOGUE_RELU)
 
 
+def is_bmm_eligible(input: torch.Tensor, mat2: torch.Tensor) -> bool:
+    """Same reasoning as is_linear_eligible -- pulled out so
+    amd_tuned_torch.compile_ops's register_fake can reuse the exact same,
+    purely shape/dtype-based decision `bmm` makes."""
+    if not available() or not _eligible(input, mat2):
+        return False
+    return input.dim() == 3 and mat2.dim() == 3
+
+
 def bmm(input: torch.Tensor, mat2: torch.Tensor) -> Optional[torch.Tensor]:
     """C[i] = A[i] @ B[i] for 3D inputs -- torch.bmm's semantics, so mat2 is
     [batch, K, N] and is not transposed on the way in. None if
     unavailable/unsupported."""
-    if not available() or not _eligible(input, mat2):
-        return None
-    if input.dim() != 3 or mat2.dim() != 3:
+    if not is_bmm_eligible(input, mat2):
         return None
     try:
         return _C.hipblaslt_bmm(input, mat2)

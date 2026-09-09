@@ -6,6 +6,7 @@
 // when building for ROCm, same as upstream's own build path.
 #include <torch/types.h>
 #include <torch/torch.h>
+#include <ATen/cuda/CUDAContext.h>
 
 #include <cuda.h>
 #include <cuda_runtime.h>
@@ -65,8 +66,97 @@ typedef float float_v16 __attribute__((ext_vector_type(16)));
 #define FLOATV16(pointer) (reinterpret_cast<float_v16 *>((void *)&(pointer))[0])
 #define FLOAT4(pointer) (reinterpret_cast<float4 *>(&(pointer))[0])
 
+// A row of Si is handled by `split` consecutive threads (see the work-split
+// comment in fwd_kernel). `split` divides WAVE_SIZE and the slices of one row
+// are consecutive lanes, so a row never straddles two waves: these reduce
+// through the wave's own shuffle network, with no LDS traffic and no barrier.
+// Every participating lane ends up holding the result, which is what lets the
+// loop-carried row_max/l_i below stay correct in all `split` copies.
+__device__ __forceinline__ float32_t slice_reduce_max(float32_t v, int split)
+{
+    for (int m = 1; m < split; m <<= 1)
+        v = max(v, __shfl_xor(v, m, WAVE_SIZE));
+    return v;
+}
+
+__device__ __forceinline__ float32_t slice_reduce_add(float32_t v, int split)
+{
+    for (int m = 1; m < split; m <<= 1)
+        v += __shfl_xor(v, m, WAVE_SIZE);
+    return v;
+}
+
+// -Ofast/-ffast-math imply -ffinite-math-only, under which isfinite() and any
+// NaN/Inf comparison may be folded to a constant -- a guard written the
+// obvious way is silently deleted. Inspecting the exponent bits is something
+// the optimizer cannot assume anything about, so these checks survive.
+__device__ __forceinline__ bool is_finite_f32(float v)
+{
+    union { float f; uint32_t u; } b;
+    b.f = v;
+    return (b.u & 0x7F800000u) != 0x7F800000u;
+}
+
 //================================ Matrix multiplication ===============================
 // C = (A^T)B + C
+// FIX: fp32-accumulating twin of mul_add_AT_B(). The original
+// round-trips C through ComputeType on every tile -- load_matrix_sync
+// into a half/bfloat16 accumulator fragment, add, store back -- so a
+// gradient summed over Tr (or Tc) tiles pays one rounding per tile. At
+// 4k context that is 64 roundings, and in bf16 (8 mantissa bits) it put
+// dK/dV an order of magnitude above stock. The backward now accumulates
+// dQ/dK/dV in fp32 global buffers and converts once at the end; only the
+// accumulator type changes here, the math is identical.
+template <int N_WAVES>
+__device__ void mul_add_AT_B_f32(
+    ComputeType *__restrict__ A,
+    ComputeType *__restrict__ B,
+    float32_t *__restrict__ C,
+    int lda, int ldb, int ldc,
+    const int m, const int n, const int k, const float scale)
+{
+    rocwmma::fragment<matrix_a, ROCWMMA_M, ROCWMMA_N, ROCWMMA_K, ComputeType, col_major> fragA[1];
+    rocwmma::fragment<matrix_b, ROCWMMA_M, ROCWMMA_N, ROCWMMA_K, ComputeType, row_major> fragB[1];
+    rocwmma::fragment<accumulator, ROCWMMA_M, ROCWMMA_N, ROCWMMA_K, float32_t> fragC;
+    rocwmma::fragment<accumulator, ROCWMMA_M, ROCWMMA_N, ROCWMMA_K, float32_t> fragACC;
+
+    const int wave_id = __builtin_amdgcn_readfirstlane(threadIdx.x / WAVE_SIZE);
+
+    for (int wave_off = 0; wave_off < ((m * n) / (ROCWMMA_M * ROCWMMA_N) + N_WAVES - 1) / N_WAVES; wave_off++)
+    {
+        int wave_xy = __builtin_amdgcn_readfirstlane(wave_id + wave_off * N_WAVES);
+
+        int wave_x = __builtin_amdgcn_readfirstlane(wave_xy % (n / ROCWMMA_N));
+        int wave_y = __builtin_amdgcn_readfirstlane(wave_xy / (n / ROCWMMA_N));
+
+        int blk_x = __builtin_amdgcn_readfirstlane(wave_x * ROCWMMA_N);
+        int blk_y = __builtin_amdgcn_readfirstlane(wave_y * ROCWMMA_M);
+
+        if ((blk_x < n) && (blk_y < m))
+        {
+            rocwmma::fill_fragment(fragACC, (float32_t)0.0);
+            for (int i = 0; i < k; i += 1*ROCWMMA_K)
+            {
+                rocwmma::load_matrix_sync(fragA[0], A + (i * lda + blk_y), lda); // m
+                rocwmma::load_matrix_sync(fragB[0], B + (i * ldb + blk_x), ldb); // n
+
+                // rocwmma::load_matrix_sync(fragA[1], A + ((i+ROCWMMA_K) * lda + blk_y), lda); 
+                // rocwmma::load_matrix_sync(fragB[1], B + ((i+ROCWMMA_K) * ldb + blk_x), ldb);
+
+                rocwmma::mma_sync(fragACC, fragA[0], fragB[0], fragACC);
+                // rocwmma::mma_sync(fragACC, fragA[1], fragB[1], fragACC);
+            }
+            rocwmma::load_matrix_sync(fragC, C + (blk_y * ldc + blk_x), ldc, rocwmma::mem_row_major); // n
+            for (int i = 0; i < fragC.num_elements; ++i)
+            {
+                fragC.x[i] = fragACC.x[i] * scale + fragC.x[i];
+            }
+            rocwmma::store_matrix_sync(C + (blk_y * ldc + blk_x), fragC, ldc, rocwmma::mem_row_major);
+        }
+    }
+    //__syncthreads();
+}
+
 template <int N_WAVES>
 __device__ void mul_add_AT_B(
     ComputeType *__restrict__ A,
@@ -168,7 +258,6 @@ __device__ void mul_A_BT(
                 // fragACC = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32(fragA[3], fragB[3], fragACC);
             }
             fragACC = fragACC * scale;
-            __syncthreads();
 
             for (int ele = 0; ele < 8; ++ele)
             {
@@ -181,6 +270,70 @@ __device__ void mul_A_BT(
 }
 
 // C = A@B + C
+// FIX: fp32-accumulating twin of mul_add_A_B(). The original
+// round-trips C through ComputeType on every tile -- load_matrix_sync
+// into a half/bfloat16 accumulator fragment, add, store back -- so a
+// gradient summed over Tr (or Tc) tiles pays one rounding per tile. At
+// 4k context that is 64 roundings, and in bf16 (8 mantissa bits) it put
+// dK/dV an order of magnitude above stock. The backward now accumulates
+// dQ/dK/dV in fp32 global buffers and converts once at the end; only the
+// accumulator type changes here, the math is identical.
+template <int N_WAVES>
+__device__ void mul_add_A_B_f32(
+    ComputeType *__restrict__ A,
+    ComputeType *__restrict__ B,
+    float32_t *__restrict__ C,
+    int lda, int ldb, int ldc,
+    const int m, const int n, const int k)
+{
+
+    rocwmma::fragment<matrix_a, ROCWMMA_M, ROCWMMA_N, ROCWMMA_K, ComputeType, row_major> fragA[2];
+    rocwmma::fragment<matrix_b, ROCWMMA_M, ROCWMMA_N, ROCWMMA_K, ComputeType, row_major> fragB[2];
+    rocwmma::fragment<accumulator, ROCWMMA_M, ROCWMMA_N, ROCWMMA_K, float32_t> fragC;
+    rocwmma::fragment<accumulator, ROCWMMA_M, ROCWMMA_N, ROCWMMA_K, float32_t> fragACC;
+
+    const int wave_id = __builtin_amdgcn_readfirstlane(threadIdx.x / WAVE_SIZE);
+
+    for (int wave_off = 0; wave_off < ((m * n) / (ROCWMMA_M * ROCWMMA_N) + N_WAVES - 1) / N_WAVES; wave_off++)
+    {
+        int wave_xy = __builtin_amdgcn_readfirstlane(wave_id + wave_off * N_WAVES);
+
+        int wave_x = __builtin_amdgcn_readfirstlane(wave_xy % (n / ROCWMMA_N));
+        int wave_y = __builtin_amdgcn_readfirstlane(wave_xy / (n / ROCWMMA_N));
+
+        int blk_x = __builtin_amdgcn_readfirstlane(wave_x * ROCWMMA_N);
+        int blk_y = __builtin_amdgcn_readfirstlane(wave_y * ROCWMMA_M);
+        if ((blk_x < n) && (blk_y < m))
+        {
+            rocwmma::fill_fragment(fragACC, (float32_t)0.0);
+            for (int i = 0; i < k; i += ROCWMMA_K * 2)
+            {
+                rocwmma::load_matrix_sync(fragA[0], A + (blk_y * lda + i), lda); //k
+                rocwmma::load_matrix_sync(fragB[0], B + (i * ldb + blk_x), ldb); //n
+                
+                rocwmma::load_matrix_sync(fragA[1], A + (blk_y * lda + (i + 1 * ROCWMMA_K)), lda);
+                rocwmma::load_matrix_sync(fragB[1], B + ((i + 1 * ROCWMMA_K) * ldb + blk_x), ldb);
+                // rocwmma::load_matrix_sync(fragA[2], A + (blk_y * k + (i + 2 * ROCWMMA_K)), k);
+                // rocwmma::load_matrix_sync(fragB[2], B + ((i + 2 * ROCWMMA_K) * n + blk_x), n);
+                // rocwmma::load_matrix_sync(fragA[3], A + (blk_y * k + (i + 3 * ROCWMMA_K)), k);
+                // rocwmma::load_matrix_sync(fragB[3], B + ((i + 3 * ROCWMMA_K) * n + blk_x), n);
+
+                rocwmma::mma_sync(fragACC, fragA[0], fragB[0], fragACC);
+                rocwmma::mma_sync(fragACC, fragA[1], fragB[1], fragACC);
+                // rocwmma::mma_sync(fragACC, fragA[2], fragB[2], fragACC);
+                // rocwmma::mma_sync(fragACC, fragA[3], fragB[3], fragACC);
+            }
+            rocwmma::load_matrix_sync(fragC, C + (blk_y * ldc + blk_x), ldc, rocwmma::mem_row_major); //n
+            for (int i = 0; i < fragC.num_elements; ++i)
+            {
+                fragC.x[i] = fragACC.x[i] + fragC.x[i];
+            }
+            rocwmma::store_matrix_sync(C + (blk_y * ldc + blk_x), fragC, ldc, rocwmma::mem_row_major); //n
+        }
+    }
+    //__syncthreads();
+}
+
 template <int N_WAVES>
 __device__ void mul_add_A_B(
     ComputeType *__restrict__ A,
@@ -384,12 +537,40 @@ __launch_bounds__(WAVE_SIZE * N_WAVES)
     float32_t row_max_old = -INFINITY;
     float32_t l_i = 0;
 
+    // ---- softmax epilogue work split ------------------------------------
+    // Row max, exp, rowsum and the Oi rescale all used to run under
+    // `if (tx < Br)`: 64 of the block's 512 threads, so 14 of 16 waves waited
+    // at the barrier while two waves walked Bc=128 elements per row -- 128
+    // exp2f each, a transcendental at quarter rate. That epilogue, not the
+    // WMMA GEMMs on either side of it, is where the kernel spent most of its
+    // time.
+    //
+    // Each row is now split sm_split ways. tx = row * sm_split + slice keeps a
+    // row's slices in consecutive lanes and sm_split divides WAVE_SIZE, so the
+    // reductions above are wave shuffles. sm_row < Br holds by construction
+    // (sm_split = BLOCK_THREADS / Br), so every thread has a share and every
+    // lane is active at the shuffles -- which is required for them to be
+    // correct.
+    constexpr int BLOCK_THREADS = WAVE_SIZE * N_WAVES;
+    const int sm_split = BLOCK_THREADS / Br;
+    const int sm_row   = tx / sm_split;
+    const int sm_slice = tx % sm_split;
+    const int sm_off   = sm_slice * 16;   // half16 granularity
+    const int sm_step  = sm_split * 16;
+
     for (int j = 0; j < Tc; j++)
     {
 
         ComputeType *__restrict__ Kj = &k[kv_offset + (j * Bc) * ld_qkv];
         ComputeType *__restrict__ Vj = &v[kv_offset + (j * Bc) * ld_qkv];
         int ele_x = j * Bc;
+        // Tile is entirely above the causal diagonal: every element of Si
+        // would be masked to -MAX_NUM and contribute nothing.
+        if constexpr (causal)
+        {
+            if (ele_x > ele_y + Br - 1)
+                break;
+        }
         int xr = ele_x + Bc;
         float32_t row_max_new = -INFINITY; // mij
         float32_t row_sum = 0;
@@ -437,30 +618,27 @@ __launch_bounds__(WAVE_SIZE * N_WAVES)
         }
         //------------
 
-        if (tx < Br)
         {
-// --------------------- find every row max val in Si[Br * Bc]
-                float16_t val16 = row_max_new;
-#pragma unroll 2
-            for (int i = 0; i < Bc; i += 16)
+// --------------------- row max: this thread's slice, then across the slices
+            float16_t val16 = row_max_new;
+            for (int i = sm_off; i < Bc; i += sm_step)
             {
-                half16 val = HALF16(Si[(tx * Bc) + i]);
+                half16 val = HALF16(Si[(sm_row * Bc) + i]);
 
 #pragma unroll
                 for (int j = 0; j < 16; j++)
                     val16 = max(val16, val[j]); // V_PK_MAX_F16
             }
-            row_max_new = val16;
+            row_max_new = slice_reduce_max((float32_t)val16, sm_split);
 
             row_max_new = max(row_max_old, row_max_new);
             rowmax_diff_exp = exp2f(row_max_old - row_max_new);
             row_max_old = row_max_new;
 
 //--------------------Calc Pi = exp(Si - mi) and rowsum
-#pragma unroll 4
-            for (int i = 0; i < Bc; i += 16)
+            for (int i = sm_off; i < Bc; i += sm_step)
             {
-                half16 val = HALF16(Si[(tx * Bc) + i]);
+                half16 val = HALF16(Si[(sm_row * Bc) + i]);
                 float_v16 val_f32;
 #pragma unroll // Load fp16 into VGPRs and convert to FP32
                 for (int j = 0; j < 16; j++)
@@ -479,18 +657,18 @@ __launch_bounds__(WAVE_SIZE * N_WAVES)
                 for (int j = 0; j < 16; j++)
                     val[j] = val_f32[j];
 
-               // write back
-                HALF16(Si[(tx * Bc) + i]) = val;
+               // write back -- slices own disjoint 16-element chunks of the row
+                HALF16(Si[(sm_row * Bc) + i]) = val;
             }
+            row_sum = slice_reduce_add(row_sum, sm_split);
             l_i = rowmax_diff_exp * l_i + row_sum;
 
 // --------------------- calc: Oi *= exp2f(row_max_old - row_max_new)
-#pragma unroll 4
-            for (int i = 0; i < d; i += 16)
+            for (int i = sm_off; i < d; i += sm_step)
             {
-                half16 val = HALF16(Oi[(tx * d) + i]); 
-                val = val * rowmax_diff_exp; // V_PK_MUL_F16 
-                HALF16(Oi[(tx * d) + i]) = val;
+                half16 val = HALF16(Oi[(sm_row * d) + i]);
+                val = val * rowmax_diff_exp; // V_PK_MUL_F16
+                HALF16(Oi[(sm_row * d) + i]) = val;
             }
 // --------------------- 
         }
@@ -513,42 +691,68 @@ __launch_bounds__(WAVE_SIZE * N_WAVES)
         __syncthreads();
     }
 
-    if (tx < Br)
     {
-// #pragma unroll 32
-//         for (int i = 0; i < d; i++)
-//             Oi[tx * d + i] = Oi[tx * d + i] / l_i;
-
 //------------------------ Calc: Oi /= li  Write back: Oi
-#pragma unroll 4
-            for (int i = 0; i < d; i += 16)
-            {
-                half16 val = HALF16(Oi[(tx * d) + i]);
-                // float8 val_f32;
-// #pragma unroll
-                // for (int j = 0; j < 8; j++)
-                    // val_f32[j] = val[j];
+        // FIX: a padded query row is masked to -MAX_NUM across its whole
+        // width. In bf16 MAX_NUM is INFINITY, so exp2f(-inf) == 0 leaves
+        // l_i == 0: Oi/l_i wrote 0/0 == NaN into O's padding, and
+        // row_max_old + log2f(0) wrote -inf into L. The NaN was invisible
+        // here (O is sliced back to n before it is returned) but L is handed
+        // straight to bwd_kernel, which turned that -inf into NaN gradients.
+        // Fixed at both ends; a row with no unmasked keys contributes
+        // nothing, so give it a finite zero.
+        const bool dead_row = !is_finite_f32(l_i) || !(l_i > 0.0f);
+        const float32_t l_div = dead_row ? 1.0f : l_i;
+        for (int i = sm_off; i < d; i += sm_step)
+        {
+            half16 val = HALF16(Oi[(sm_row * d) + i]);
+            val = val / l_div;
+            HALF16((&(o[q_offset + (Tr_i * Br) * ld_qkv]))[sm_row * ld_qkv + i]) = val;
+        }
 
-                val = val / l_i;
-
-// #pragma unroll
-                // for (int j = 0; j < 8; j++)
-                    // val[j] = val_f32[j];
-                    
-                //HALF8(Oi[(tx * d) + i]) = val;
-                HALF16((&(o[q_offset + (Tr_i * Br) * ld_qkv]))[tx * ld_qkv + i]) = val;
-            }
-
-// #pragma unroll 4
-//         for (int i = 0; i < d; i += 16)
-//             // o[q_offset + Tr_i * Br * d + tx * d + i] = Oi[tx * d + i];
-//             FLOAT8((&(o[q_offset + Tr_i * Br * d]))[tx * d + i]) = FLOAT8(Oi[tx * d + i]);
-
-        l_i = row_max_old + log2f(l_i);
-        L[L_offset + Tr_i * Br + tx] = l_i;
+        // l_i and row_max_old are replicated across a row's slices by the
+        // reductions above, so any one slice can write L; pick the first.
+        if (sm_slice == 0)
+            L[L_offset + Tr_i * Br + sm_row] = dead_row ? 0.0f : (row_max_old + log2f(l_i));
     }
 }
 // =================================================================================
+
+// Di[i] = sum_j dO[i][j] * O[i][j], one row per thread. Was recomputed
+// in full by every bwd_kernel workgroup; see R2-B.
+__global__ void __launch_bounds__(256) bwd_preprocess_kernel(
+    ComputeType *__restrict__ O,
+    ComputeType *__restrict__ dO,
+    float *__restrict__ Di,
+    const int nq, const int d,
+    const int64_t stride_0, const int64_t stride_1, const int64_t stride_2,
+    const int64_t L_stride_b, const int64_t L_stride_h,
+    const bool permute_NH)
+{
+    int q_offset = blockIdx.x * stride_0 + blockIdx.y * stride_1;
+    int ld_o = stride_2;
+    if (permute_NH)
+    {
+        q_offset = blockIdx.x * stride_0 + blockIdx.y * stride_2;
+        ld_o = stride_1;
+    }
+    const int L_offset = blockIdx.x * L_stride_b + blockIdx.y * L_stride_h;
+
+    const int row = blockIdx.z * blockDim.x + threadIdx.x;
+    if (row >= nq)
+        return;
+
+    float32_t val = 0;
+    for (int i = 0; i < d; i += 16)
+    {
+        half16 a = HALF16(dO[q_offset + row * ld_o + i]);
+        half16 b = HALF16(O[q_offset + row * ld_o + i]);
+#pragma unroll
+        for (int j = 0; j < 16; j++)
+            val += (float32_t)a[j] * (float32_t)b[j];
+    }
+    Di[L_offset + row] = val;
+}
 
 template <bool pad_mask, bool causal, int N_WAVES>
 __global__ void
@@ -559,9 +763,9 @@ bwd_kernel(
     ComputeType *__restrict__ v,  // [(b*h) x N x d]
     ComputeType *__restrict__ O,  // [(b*h) x N x d]
     ComputeType *__restrict__ dO, // [(b*h) x N x d]
-    ComputeType *__restrict__ dQ, // [(b*h) x N x d]
-    ComputeType *__restrict__ dK, // [(b*h) x N x d]
-    ComputeType *__restrict__ dV, // [(b*h) x N x d]
+    float32_t *__restrict__ dQ,   // [(b*h) x N x d], fp32 accumulator
+    float32_t *__restrict__ dK,   // [(b*h) x N x d], fp32 accumulator
+    float32_t *__restrict__ dV,   // [(b*h) x N x d], fp32 accumulator
     float *__restrict__ Di,       // [(b*h) * N]
     float *__restrict__ L,        // [(b*h) * N]
     const int Tr, const int Tc,
@@ -571,7 +775,8 @@ bwd_kernel(
     const int64_t Q_O_dO_stride_0, const int64_t Q_O_dO_stride_1, const int64_t Q_O_dO_stride_2,
     const int64_t kvDkv_stride_0, const int64_t kvdKv_stride_1, const int64_t kvdKv_stride_2,
     const int64_t L_stride_b, const int64_t L_stride_h,
-    const float32_t scale, const bool permute_NH
+    const float32_t scale, const bool permute_NH,
+    const bool q_pass
     )
 
 {
@@ -589,52 +794,52 @@ bwd_kernel(
 
     const int L_offset = L_stride_b * blockIdx.x + L_stride_h * blockIdx.y;
 
-    const int Tc_j = blockIdx.z;
-    if (Tc_j >= Tc)
-        return;
-    const int ele_x = Tc_j * Bc;
     const int tx = threadIdx.x;
+
+    // Backward runs as two passes over the same (Tr_i, Tc_j) tile grid; see
+    // the launch site in backward_fp16(). Both recompute Si/Pi/dPi/dSi for a
+    // tile. They differ only in which gradient they accumulate and -- the
+    // whole point -- in which tile index the *workgroup* owns:
+    //
+    //   q_pass == false : blockIdx.z is Tc_j, inner loop walks Tr_i -> dK, dV
+    //   q_pass == true  : blockIdx.z is Tr_i, inner loop walks Tc_j -> dQ
+    //
+    // FIX: dQ used to be accumulated by the dK/dV pass, whose workgroups are
+    // indexed by Tc_j. But dQi is a [Br x d] slice selected by Tr_i, so all
+    // Tc workgroups of a given (b, h) read-modify-wrote the *same* dQ rows at
+    // the same time -- mul_add_A_B() does a plain load_matrix_sync / add /
+    // store_matrix_sync, not an atomic -- and all but one block's
+    // contribution was silently lost. dK/dV never had the bug because dKj/dVj
+    // are selected by Tc_j, which those workgroups own exclusively; that is
+    // exactly why dK/dV measured correct against a reference while dQ did
+    // not, at every shape. Giving dQ a pass indexed by Tr_i makes its
+    // accumulation workgroup-private too, so no atomics are needed. The cost
+    // is recomputing Si and dPi once more per tile (7 tile-GEMMs per tile
+    // pair instead of 5).
+    const int n_outer = q_pass ? Tr : Tc;
+    if (blockIdx.z >= n_outer)
+        return;
+    const int n_inner = q_pass ? Tc : Tr;
 
     extern __shared__ ComputeType sram[];
     ComputeType *__restrict__ Si = &sram[0]; //[Br x Bc]
     ComputeType *__restrict__ Pi = &sram[0];
     ComputeType *__restrict__ dSi = &sram[0];
     ComputeType *__restrict__ dPi = &sram[Br * Bc];    //[Br x Bc]
-    // ComputeType *__restrict__ Kj = &sram[2 * Br * Bc]; // [Bc x d]
 
-    ComputeType *__restrict__ Kj = &k[kv_offset + (Tc_j * Bc) * ld_qkv]; // [Bc x d]
-    ComputeType *__restrict__ Vj = &v[kv_offset + (Tc_j * Bc) * ld_qkv]; // [Bc x d]
+    // `scale` arrives pre-multiplied by log2(e) so that mul_A_BT() can feed
+    // exp2f() directly (the forward softmax works in the exp2 domain). The
+    // true dS is therefore ln(2) times what that scale produces.
+    //
+    // FIX: that ln(2) used to be applied only on the dK GEMM
+    // (mul_add_AT_B(..., 0.69314718f)). dQ's GEMM, mul_add_A_B(), takes no
+    // scale argument at all, so dQ came out log2(e) = 1.4427x too large -- in
+    // every shape and both dtypes, independent of the race above. Folding the
+    // factor into dSi here fixes dQ and leaves dK unchanged (its GEMM scale
+    // drops to 1.0f below). dV does not go through dSi and is unaffected.
+    const float32_t dS_scale = scale * 0.69314718f;
 
-    ComputeType *__restrict__ dKj = &dK[kv_offset + (Tc_j * Bc) * ld_qkv]; // [Bc x d]
-    ComputeType *__restrict__ dVj = &dV[kv_offset + (Tc_j * Bc) * ld_qkv]; // [Bc x d]
-
-    for (int n_batch = 0; n_batch < ((nq + (blockDim.x - 1)) / blockDim.x); n_batch++)
-    {
-        int Di_off = n_batch * (blockDim.x) + tx;
-        if (Di_off < nq)
-        {
-            float32_t val = 0;
-#pragma unroll 2
-            for (int i = 0; i < d; i+=16)
-            {
-                half16 line_16 = HALF16(dO[q_offset + Di_off * ld_qkv + i]);
-                half16 line_16_2 = HALF16(O[q_offset + Di_off * ld_qkv + i]);
-                float_v16 line_32;
-                float_v16 line_32_2;
-#pragma unroll 
-                for(int j = 0; j < 16; j++)
-                {
-                    line_32[j] = (line_16[j]);
-                    line_32_2[j] = (line_16_2[j]);
-                }
-                line_32 = line_32 * line_32_2;
-                for(int j = 0; j < 16; j++)
-                    val += line_32[j];
-                // val += (dO[q_offset + Di_off * d + i] * O[q_offset + Di_off * d + i]);
-            }
-            Di[L_offset + Di_off] = val;
-        }
-    }
+    // Di now comes from bwd_preprocess_kernel (see R2-B).
 
     //     if (tx < d)
     //     {
@@ -647,17 +852,37 @@ bwd_kernel(
 
     __syncthreads();
 
-    for (int Tr_i = 0; Tr_i < Tr; Tr_i++)
+    for (int inner = 0; inner < n_inner; inner++)
     {
-        ComputeType *__restrict__ Qi = &q[q_offset + (Tr_i * Br) * ld_qkv];   // [Br x d]
-        ComputeType *__restrict__ Oi = &O[q_offset + (Tr_i * Br) * ld_qkv];   // [Br x d]
-        ComputeType *__restrict__ dOi = &dO[q_offset + (Tr_i * Br) * ld_qkv]; // [Br x d]
-        ComputeType *__restrict__ dQi = &dQ[q_offset + (Tr_i * Br) * ld_qkv]; // [Br x d]
-        float32_t *__restrict__ Li = &L[L_offset + Tr_i * Br];         // [Br]
-        float32_t *__restrict__ Di_i = &Di[L_offset + Tr_i * Br];
-        int ele_y = Tr_i * Br;
-        int yb = ele_y + Br;
-        int xr = ele_x + Bc;
+        const int Tr_i = q_pass ? blockIdx.z : inner;
+        const int Tc_j = q_pass ? inner : blockIdx.z;
+
+        const int ele_x = Tc_j * Bc;
+        const int ele_y = Tr_i * Br;
+        const int yb = ele_y + Br;
+        const int xr = ele_x + Bc;
+
+        // Tile lies entirely above the causal diagonal: Si is masked to
+        // -MAX_NUM across the whole tile, Pi is 0, and every accumulation
+        // below adds exactly nothing. fwd_kernel already skips these; the
+        // backward used to walk them all anyway.
+        if (causal && (ele_x > ele_y + Br - 1))
+        {
+            if (q_pass)
+                break;    // inner is Tc_j, ascending: every later tile too
+            continue;     // inner is Tr_i: later, lower rows do have work
+        }
+
+        ComputeType *__restrict__ Kj = &k[kv_offset + ele_x * ld_qkv];   // [Bc x d]
+        ComputeType *__restrict__ Vj = &v[kv_offset + ele_x * ld_qkv];   // [Bc x d]
+        float32_t *__restrict__ dKj = &dK[kv_offset + ele_x * ld_qkv];   // [Bc x d]
+        float32_t *__restrict__ dVj = &dV[kv_offset + ele_x * ld_qkv];   // [Bc x d]
+
+        ComputeType *__restrict__ Qi = &q[q_offset + ele_y * ld_qkv];   // [Br x d]
+        ComputeType *__restrict__ dOi = &dO[q_offset + ele_y * ld_qkv]; // [Br x d]
+        float32_t *__restrict__ dQi = &dQ[q_offset + ele_y * ld_qkv];   // [Br x d]
+        float32_t *__restrict__ Li = &L[L_offset + ele_y];              // [Br]
+        float32_t *__restrict__ Di_i = &Di[L_offset + ele_y];
 
         mul_A_BT<N_WAVES>(Qi, Kj, Si,  ld_qkv,ld_qkv,Bc,   Br, Bc, d, scale); // Qi[Br x d] Kj[Bc x d]
         __syncthreads();
@@ -702,6 +927,17 @@ bwd_kernel(
 //             }
 
             float32_t row_max = Li[tx];
+            // FIX: a padded query row (row >= nq) is masked to -MAX_NUM across
+            // its entire width, so the forward accumulated l_i == 0 for it and
+            // stored L = row_max + log2f(0) = -inf. `Si - row_max` is then
+            // (-inf) - (-inf) = NaN, exp2f(NaN) = NaN, and that NaN row of Pi
+            // poisons dV = Pi^T @ dO and dK for the *whole* Bc tile -- which is
+            // why dK/dV came back all-NaN for any shape whose n or n_kv was not
+            // a multiple of Br/Bc. Only bf16 tripped it: fp16's MAX_NUM is a
+            // finite 30000.0, so its dead rows produced a finite L by luck.
+            // Such a row contributes nothing, so flatten it to Pi == 0.
+            if (!is_finite_f32(row_max))
+                row_max = 0.0f;
 #pragma unroll 4
             for (int i = 0; i < Bc; i += 8)
             {
@@ -727,7 +963,8 @@ bwd_kernel(
         }
         __syncthreads();
 
-        mul_add_AT_B<N_WAVES>(Pi, dOi, dVj,Bc,ld_qkv,ld_qkv,    Bc, d, Br, 1); // Pi[Br x Bc] @ dOi[Br x d]
+        if (!q_pass)
+            mul_add_AT_B_f32<N_WAVES>(Pi, dOi, dVj,Bc,ld_qkv,ld_qkv,    Bc, d, Br, 1); // Pi[Br x Bc] @ dOi[Br x d]
         mul_A_BT<N_WAVES>(dOi, Vj, dPi,ld_qkv,ld_qkv,  Bc,     Br, Bc, d, 1);  // dPi:[Br x Bc]
         __syncthreads();
         if (tx < Br)
@@ -735,12 +972,14 @@ bwd_kernel(
 #pragma unroll 32
             for (int i = 0; i < Bc; i++)
             {
-                dSi[tx * Bc + i] = scale * Pi[tx * Bc + i] * (dPi[tx * Bc + i] - Di_i[tx]);
+                dSi[tx * Bc + i] = dS_scale * Pi[tx * Bc + i] * (dPi[tx * Bc + i] - Di_i[tx]);
             }
         }
         __syncthreads();
-        mul_add_A_B<N_WAVES>(dSi, Kj, dQi, Bc, ld_qkv,  ld_qkv,  Br, d, Bc);  // dSi[Br x Bc] @ Kj[Bc x d]
-        mul_add_AT_B<N_WAVES>(dSi, Qi, dKj, Bc, ld_qkv,  ld_qkv,  Bc, d, Br, 0.69314718f); // dSi[Br x Bc] @ Qi[Br x d]
+        if (q_pass)
+            mul_add_A_B_f32<N_WAVES>(dSi, Kj, dQi, Bc, ld_qkv,  ld_qkv,  Br, d, Bc);  // dSi[Br x Bc] @ Kj[Bc x d]
+        else
+            mul_add_AT_B_f32<N_WAVES>(dSi, Qi, dKj, Bc, ld_qkv,  ld_qkv,  Bc, d, Br, 1.0f); // dSi[Br x Bc] @ Qi[Br x d]
         __syncthreads();
     }
 }
@@ -777,11 +1016,27 @@ std::vector<torch::Tensor> forward_fp16(
         else
             q_pad = torch::nn::functional::pad(q_pad, torch::nn::functional::PadFuncOptions({0, d_pad_sz, 0, Nq_pad_sz})); 
     }
-    // if (Nkv_pad_sz || d_pad_sz)
-    if (d_pad_sz)
+    // FIX (was `if (d_pad_sz)`, with this condition commented out above it):
+    // K/V's sequence dimension was never padded to a multiple of Bc, even
+    // though the launch config (Tc = ceil(n_kv/Bc)) and every kernel read of
+    // Kj/Vj (mul_A_BT/mul_add_A_B) assume a full Tc*Bc-wide allocation. With
+    // n_kv not a multiple of Bc -- always true for SDXL cross-attention,
+    // where n_kv is CLIP's fixed 77-token context -- the kernel read past
+    // the end of K/V's real storage: an illegal memory access, not merely a
+    // wrong-answer bug. backward_fp16() below already pads K/V by
+    // Nkv_pad_sz; this mirrors that.
+    if (Nkv_pad_sz || d_pad_sz)
     {
-        k_pad = torch::nn::functional::pad(k_pad, torch::nn::functional::PadFuncOptions({0, d_pad_sz, 0, 0}));
-        v_pad = torch::nn::functional::pad(v_pad, torch::nn::functional::PadFuncOptions({0, d_pad_sz, 0, 0}));
+        if (permute_NH)
+        {
+            k_pad = torch::nn::functional::pad(k_pad, torch::nn::functional::PadFuncOptions({0, d_pad_sz, 0, 0, 0, Nkv_pad_sz}));
+            v_pad = torch::nn::functional::pad(v_pad, torch::nn::functional::PadFuncOptions({0, d_pad_sz, 0, 0, 0, Nkv_pad_sz}));
+        }
+        else
+        {
+            k_pad = torch::nn::functional::pad(k_pad, torch::nn::functional::PadFuncOptions({0, d_pad_sz, 0, Nkv_pad_sz}));
+            v_pad = torch::nn::functional::pad(v_pad, torch::nn::functional::PadFuncOptions({0, d_pad_sz, 0, Nkv_pad_sz}));
+        }
     }
     if (q_pad.stride(-1) != 1)
         q_pad = q_pad.contiguous();
@@ -796,20 +1051,18 @@ std::vector<torch::Tensor> forward_fp16(
     const int Tc = ceil((float)n_kv / Bc);
 
     // auto opt = torch::TensorOptions().dtype(TORCH_DTYPE).device(torch::kCUDA);
-    auto O = torch::zeros_like(q_pad);
+    auto O = torch::empty_like(q_pad);
 
     auto opt2 = torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA);
-    auto L = torch::zeros({b, h, n + Nq_pad_sz}, opt2);
+    auto L = torch::empty({b, h, n + Nq_pad_sz}, opt2);
 
     int N_WAVES = 16;
     // if(d + d_pad_sz == 128)
     //     N_WAVES = 32;
 
     auto blockDim = dim3(WAVE_SIZE * N_WAVES);
-    int nblk = b * h * Tr;
-    int trPad = 96 - (nblk % 96); // TODO: 96 CU only for gfx1100
 
-    auto gridDim = dim3(b, h, Tr + trPad);
+    auto gridDim = dim3(b, h, Tr);
 
     const int sram_sz =
         Br * Bc * sizeof(ComputeType)               // Si
@@ -837,23 +1090,23 @@ std::vector<torch::Tensor> forward_fp16(
     if(N_WAVES == 32)
     {
         if (!pad_mask && !causal)
-            fwd_kernel<false, false,32><<<gridDim, blockDim, sram_sz>>>(para_fwd);
+            fwd_kernel<false, false,32><<<gridDim, blockDim, sram_sz, at::cuda::getCurrentCUDAStream()>>>(para_fwd);
         else if (pad_mask && causal)
-            fwd_kernel<true, true,32><<<gridDim, blockDim, sram_sz>>>(para_fwd);
+            fwd_kernel<true, true,32><<<gridDim, blockDim, sram_sz, at::cuda::getCurrentCUDAStream()>>>(para_fwd);
         else if (!pad_mask && causal)
-            fwd_kernel<false, true,32><<<gridDim, blockDim, sram_sz>>>(para_fwd);
+            fwd_kernel<false, true,32><<<gridDim, blockDim, sram_sz, at::cuda::getCurrentCUDAStream()>>>(para_fwd);
         else if (pad_mask && !causal)
-            fwd_kernel<true, false,32><<<gridDim, blockDim, sram_sz>>>(para_fwd);
+            fwd_kernel<true, false,32><<<gridDim, blockDim, sram_sz, at::cuda::getCurrentCUDAStream()>>>(para_fwd);
     }else if(N_WAVES == 16)
     {
         if (!pad_mask && !causal)
-            fwd_kernel<false, false,16><<<gridDim, blockDim, sram_sz>>>(para_fwd);
+            fwd_kernel<false, false,16><<<gridDim, blockDim, sram_sz, at::cuda::getCurrentCUDAStream()>>>(para_fwd);
         else if (pad_mask && causal)
-            fwd_kernel<true, true,16><<<gridDim, blockDim, sram_sz>>>(para_fwd);
+            fwd_kernel<true, true,16><<<gridDim, blockDim, sram_sz, at::cuda::getCurrentCUDAStream()>>>(para_fwd);
         else if (!pad_mask && causal)
-            fwd_kernel<false, true,16><<<gridDim, blockDim, sram_sz>>>(para_fwd);
+            fwd_kernel<false, true,16><<<gridDim, blockDim, sram_sz, at::cuda::getCurrentCUDAStream()>>>(para_fwd);
         else if (pad_mask && !causal)
-            fwd_kernel<true, false,16><<<gridDim, blockDim, sram_sz>>>(para_fwd);
+            fwd_kernel<true, false,16><<<gridDim, blockDim, sram_sz, at::cuda::getCurrentCUDAStream()>>>(para_fwd);
     }
 
 
@@ -902,23 +1155,40 @@ std::vector<torch::Tensor> backward_fp16(
     const int d = Q.size(3);
     const int n_kv = permute_NH ? K.size(1):K.size(2);
 
-    //    const int dO_Npad_sz = Q.size(2) - dO.size(2);
+    // FIX (this line was present upstream, commented out): dO is the only
+    // tensor here that is NOT already padded to Q's shape. Q/K/V/O come from
+    // forward_fp16's own q_pad/k_pad/v_pad/O, whose sequence dimension was
+    // rounded up to a multiple of Br/Bc; dO is the gradient of the *sliced*
+    // output, so it still has the caller's act_n rows. Nq_pad_sz below is
+    // computed from Q's ALREADY-PADDED n, so it is 0 and padded nothing --
+    // yet every kernel read of dO uses Q's strides (see bwd_parm passing
+    // Q.stride(0..2) for the Q/O/dO group). With act_n not a multiple of Br
+    // the two disagree: dOi walks off the end of dO's real storage and, for
+    // b/h > 0, indexes the wrong batch entirely. Measured as dK/dV wrong by
+    // ~1.0 absolute at N=100 and N=130 while every multiple-of-64 N was
+    // correct to ~7e-4. Zero rows are also what the padded query rows need to
+    // contribute (they are masked out of the softmax), so a zero pad is both
+    // the safe read and the right value.
+    const int dO_Npad_sz = n - (permute_NH ? dO.size(1) : dO.size(2));
     const int dO_Dpad_sz = Q.size(3) - dO.size(3);
 
     int Nq_pad_sz = (Br - (n % Br)) % Br;
     int Nkv_pad_sz = (Bc - (n_kv % Bc)) % Bc;
-    const bool pad_mask = (Nkv_pad_sz || Nq_pad_sz || (n_kv != act_nkv));
+    // (n != act_n) added alongside the existing (n_kv != act_nkv): Nq_pad_sz
+    // is computed from Q's already-padded n and so is always 0 here, which
+    // left the forward's padded query rows unmasked in the backward.
+    const bool pad_mask = (Nkv_pad_sz || Nq_pad_sz || (n_kv != act_nkv) || (n != act_n));
 
     if(permute_NH)
     {
-        dO = torch::nn::functional::pad(dO, torch::nn::functional::PadFuncOptions({0, dO_Dpad_sz,0, 0, 0, Nq_pad_sz}));
+        dO = torch::nn::functional::pad(dO, torch::nn::functional::PadFuncOptions({0, dO_Dpad_sz,0, 0, 0, Nq_pad_sz + dO_Npad_sz}));
         Q = torch::nn::functional::pad(Q, torch::nn::functional::PadFuncOptions({0, 0,0, 0, 0, Nq_pad_sz}));
         O = torch::nn::functional::pad(O, torch::nn::functional::PadFuncOptions({0, 0,0, 0, 0, Nq_pad_sz}));
         L = torch::nn::functional::pad(L, torch::nn::functional::PadFuncOptions({0, Nq_pad_sz}));
         K = torch::nn::functional::pad(K, torch::nn::functional::PadFuncOptions({0, 0,0, 0, 0, Nkv_pad_sz}));
         V = torch::nn::functional::pad(V, torch::nn::functional::PadFuncOptions({0, 0,0, 0, 0, Nkv_pad_sz}));
     }else{
-    dO = torch::nn::functional::pad(dO, torch::nn::functional::PadFuncOptions({0, dO_Dpad_sz, 0, Nq_pad_sz}));
+    dO = torch::nn::functional::pad(dO, torch::nn::functional::PadFuncOptions({0, dO_Dpad_sz, 0, Nq_pad_sz + dO_Npad_sz}));
     Q = torch::nn::functional::pad(Q, torch::nn::functional::PadFuncOptions({0, 0, 0, Nq_pad_sz}));
     O = torch::nn::functional::pad(O, torch::nn::functional::PadFuncOptions({0, 0, 0, Nq_pad_sz}));
     L = torch::nn::functional::pad(L, torch::nn::functional::PadFuncOptions({0, Nq_pad_sz}));
@@ -927,17 +1197,37 @@ std::vector<torch::Tensor> backward_fp16(
 
     }
 
-    // Q = Q.contiguous();
-    // K = K.contiguous();
-    // V = V.contiguous();
-    // dO = dO.contiguous();
-    // O = O.contiguous();
-    // L = L.contiguous();
+    // FIX (all six were commented out): every kernel below does raw
+    // pointer arithmetic (Kj = &k[kv_offset + ...], WMMA fragment loads)
+    // assuming the last dimension is packed contiguously (stride(-1)==1).
+    // Q/K/V/O/L are safe in practice (Q/K/V come from forward's own
+    // contiguous()-guaranteed q_pad/k_pad/v_pad; O/L are freshly allocated
+    // via torch::empty_like/torch::empty) -- but dO is the externally
+    // supplied gradient from autograd, not something this kernel controls
+    // the layout of. FlashAttnRocwmmaProcessor's hidden_states.transpose(1,
+    // 2).reshape(...) call chain means autograd's backward for dO runs
+    // back through a transpose -- stride-permuting, non-materializing --
+    // so dO can arrive here non-contiguous with no error, just silently
+    // wrong strides fed into contiguous-layout pointer math: an illegal
+    // memory access, not a wrong-answer bug. .contiguous() is a no-op check
+    // (not a copy) on every tensor that's already contiguous, which is why
+    // this was safe to enable unconditionally rather than re-deriving each
+    // tensor's own stride(-1) check the way forward_fp16 does for q/k/v.
+    Q = Q.contiguous();
+    K = K.contiguous();
+    V = V.contiguous();
+    dO = dO.contiguous();
+    O = O.contiguous();
+    L = L.contiguous();
 
     const int Tr = ceil((float)act_n / Br);
     const int Tc = ceil((float)act_nkv / Bc);
 
-    auto opt = torch::TensorOptions().dtype(TORCH_DTYPE).device(torch::kCUDA);
+    // FIX: fp32, not TORCH_DTYPE. These are accumulators -- every workgroup
+    // adds its tile's partial into them -- and accumulating in half/bfloat16
+    // cost one rounding per tile. They are converted back to the input dtype
+    // just before returning.
+    auto opt = torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA);
 
     auto dQ = torch::zeros_like(Q, opt);
     auto dK = torch::zeros_like(K, opt);
@@ -945,12 +1235,22 @@ std::vector<torch::Tensor> backward_fp16(
 
     auto Di = torch::zeros_like(L);
 
+    {
+        const int PRE_THREADS = 256;
+        auto preGrid = dim3(b, h, (act_n + PRE_THREADS - 1) / PRE_THREADS);
+        bwd_preprocess_kernel<<<preGrid, dim3(PRE_THREADS), 0, at::cuda::getCurrentCUDAStream()>>>(
+            (ComputeType *)O.data_ptr<AT_PTR_TYPE>(),
+            (ComputeType *)dO.data_ptr<AT_PTR_TYPE>(),
+            (float *)Di.data_ptr<float>(),
+            act_n, d,
+            Q.stride(0), Q.stride(1), Q.stride(2),
+            L.stride(0), L.stride(1), permute_NH);
+    }
+
     
     constexpr int NWAVE = 32;
 
-    int nblk = b * h * Tc;
-    int tcPad = 96 - (nblk % 96); // TODO: 96 CU only for gfx1100
-    auto gridDim = dim3(b, h, Tc + tcPad);
+    auto gridDim = dim3(b, h, Tc);
     auto blockDim = dim3(WAVE_SIZE * NWAVE);
 
     const int sram_sz =
@@ -967,9 +1267,9 @@ std::vector<torch::Tensor> backward_fp16(
         (ComputeType *)V.data_ptr<AT_PTR_TYPE>(),  \
         (ComputeType *)O.data_ptr<AT_PTR_TYPE>(),  \
         (ComputeType *)dO.data_ptr<AT_PTR_TYPE>(), \
-        (ComputeType *)dQ.data_ptr<AT_PTR_TYPE>(), \
-        (ComputeType *)dK.data_ptr<AT_PTR_TYPE>(), \
-        (ComputeType *)dV.data_ptr<AT_PTR_TYPE>(), \
+        (float *)dQ.data_ptr<float>(), \
+        (float *)dK.data_ptr<float>(), \
+        (float *)dV.data_ptr<float>(), \
         (float *)Di.data_ptr<float>(), \
         (float *)L.data_ptr<float>(),  \
         Tr, Tc, \
@@ -981,15 +1281,26 @@ std::vector<torch::Tensor> backward_fp16(
         L.stride(0), L.stride(1), \
         scale * 1.442695f, permute_NH
 
- 
-    if (!pad_mask && !causal)
-        bwd_kernel<false, false,NWAVE><<<gridDim, blockDim, sram_sz>>>(bwd_parm);
-    else if (pad_mask && causal)
-        bwd_kernel<true, true,NWAVE><<<gridDim, blockDim, sram_sz>>>(bwd_parm);
-    else if (!pad_mask && causal)
-        bwd_kernel<false, true,NWAVE><<<gridDim, blockDim, sram_sz>>>(bwd_parm);
-    else if (pad_mask && !causal)
-        bwd_kernel<true, false,NWAVE><<<gridDim, blockDim, sram_sz>>>(bwd_parm);
+    // Two launches: the dK/dV pass is indexed by Tc_j (gridDim.z == Tc), the
+    // dQ pass by Tr_i (gridDim.z == Tr). See the mapping comment in
+    // bwd_kernel for why dQ cannot share the dK/dV pass's workgroup indexing.
+    // Same stream, so the second launch also has no ordering hazard against
+    // the first even though both touch Q/K/V.
+#define bwd_launch(grid, q_pass)                                                                                          \
+    do {                                                                                                                  \
+        if (!pad_mask && !causal)                                                                                         \
+            bwd_kernel<false, false,NWAVE><<<grid, blockDim, sram_sz, at::cuda::getCurrentCUDAStream()>>>(bwd_parm, q_pass); \
+        else if (pad_mask && causal)                                                                                      \
+            bwd_kernel<true, true,NWAVE><<<grid, blockDim, sram_sz, at::cuda::getCurrentCUDAStream()>>>(bwd_parm, q_pass);   \
+        else if (!pad_mask && causal)                                                                                     \
+            bwd_kernel<false, true,NWAVE><<<grid, blockDim, sram_sz, at::cuda::getCurrentCUDAStream()>>>(bwd_parm, q_pass);  \
+        else if (pad_mask && !causal)                                                                                     \
+            bwd_kernel<true, false,NWAVE><<<grid, blockDim, sram_sz, at::cuda::getCurrentCUDAStream()>>>(bwd_parm, q_pass);  \
+    } while (0)
+
+    bwd_launch(gridDim, false);
+    bwd_launch(dim3(b, h, Tr), true);
+#undef bwd_launch
 
     err = cudaGetLastError();
     if (err != hipSuccess)
@@ -1030,5 +1341,5 @@ std::vector<torch::Tensor> backward_fp16(
                        torch::indexing::Slice(torch::indexing::None, act_d)});
     }
 
-    return {dQ, dK, dV};
+    return {dQ.to(TORCH_DTYPE), dK.to(TORCH_DTYPE), dV.to(TORCH_DTYPE)};
 }
