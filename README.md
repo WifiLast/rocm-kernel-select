@@ -44,6 +44,67 @@ Measured with `tools/bench_fast.py` on an AMD Radeon RX 7900 XTX (ROCm 7.2.53211
 
 Speedups vary by shape and available backends (`aiter` and TransformerEngine were not installed for this run — see `backends_available` in `bench.json`). When no candidate beats stock, the dispatcher falls back to stock so patched performance is never worse by more than benchmarking noise.
 
+### conv3d parameter sweep
+
+`tools/bench_conv3d_sweep.py` sweeps `F.conv3d` across kernel size, spatial extent, channel count, batch size, anisotropic shapes, stride/padding, dtype, and asymmetric channels (38 cases). Full per-case detail (including which backend won each shape) is in [`bench_dim.json`](bench_dim.json).
+
+| | |
+|---|---|
+| Cases timed | 38 (0 failed) |
+| Winner breakdown | ck: 30, fftconv: 3, native: 3, stock: 2 |
+| Faster than stock | 27 |
+| Slower than stock | 6 |
+| Best speedup | 11.65x — `large_kernel`, N=1, C=32→32, 32x32x32, k=15, float16 |
+| Worst speedup | 0.52x — `dtype`, N=1, C=64→64, 16x16x16, k=3, float32 |
+
+The `ck` (Composable Kernel) backend wins most cases, especially large kernels and channel-heavy shapes. `stock` and plain `native` occasionally win on small/float32 cases where dispatch overhead outweighs the kernel gain — the selector caches per-shape so this only costs one extra benchmark call the first time a shape is seen.
+
+<details>
+<summary>All 38 cases (from <code>bench_dim.json</code>)</summary>
+
+| Group | Shape | Dtype | Winner | Stock (ms) | Patched (ms) | Speedup |
+|---|---|---|---|---|---|---|
+| kernel_size | N=1, C=16→16, 16x16x16, k=1, s=1, p=0 | float16 | ck | 0.062 | 0.065 | 0.96x |
+| kernel_size | N=1, C=16→16, 16x16x16, k=1, s=1, p=0 | float32 | native | 0.179 | 0.215 | 0.83x |
+| kernel_size | N=1, C=16→16, 16x16x16, k=3, s=1, p=1 | float16 | ck | 0.154 | 0.154 | 1.00x |
+| kernel_size | N=1, C=16→16, 16x16x16, k=3, s=1, p=1 | float32 | native | 0.161 | 0.139 | 1.16x |
+| kernel_size | N=1, C=16→16, 16x16x16, k=5, s=1, p=2 | float16 | ck | 0.159 | 0.145 | 1.09x |
+| kernel_size | N=1, C=16→16, 16x16x16, k=5, s=1, p=2 | float32 | stock | 0.217 | 0.265 | 0.82x |
+| kernel_size | N=1, C=16→16, 16x16x16, k=7, s=1, p=3 | float16 | ck | 0.377 | 0.075 | 5.06x |
+| kernel_size | N=1, C=16→16, 16x16x16, k=7, s=1, p=3 | float32 | stock | 0.441 | 0.446 | 0.99x |
+| kernel_size | N=1, C=16→16, 16x16x16, k=9, s=1, p=4 | float16 | ck | 0.727 | 0.147 | 4.95x |
+| kernel_size | N=1, C=16→16, 16x16x16, k=9, s=1, p=4 | float32 | fftconv | 2.912 | 0.926 | 3.15x |
+| kernel_size | N=1, C=16→16, 16x16x16, k=15, s=1, p=7 | float16 | ck | 3.198 | 0.542 | 5.90x |
+| kernel_size | N=1, C=16→16, 16x16x16, k=15, s=1, p=7 | float32 | fftconv | 8.606 | 0.866 | 9.94x |
+| spatial | N=1, C=64→64, 8x8x8, k=3, s=1, p=1 | float16 | ck | 0.172 | 0.128 | 1.34x |
+| spatial | N=1, C=64→64, 16x16x16, k=3, s=1, p=1 | float16 | ck | 0.198 | 0.149 | 1.33x |
+| spatial | N=1, C=64→64, 32x32x32, k=3, s=1, p=1 | float16 | ck | 0.908 | 0.190 | 4.77x |
+| spatial | N=1, C=64→64, 48x48x48, k=3, s=1, p=1 | float16 | ck | 3.201 | 0.548 | 5.84x |
+| channels | N=1, C=32→32, 16x16x16, k=3, s=1, p=1 | float16 | ck | 0.072 | 0.071 | 1.01x |
+| channels | N=1, C=64→64, 16x16x16, k=3, s=1, p=1 | float16 | ck | 0.125 | 0.073 | 1.72x |
+| channels | N=1, C=128→128, 16x16x16, k=3, s=1, p=1 | float16 | ck | 0.251 | 0.087 | 2.88x |
+| channels | N=1, C=256→256, 16x16x16, k=3, s=1, p=1 | float16 | ck | 0.620 | 0.252 | 2.46x |
+| batch | N=1, C=64→64, 16x16x16, k=3, s=1, p=1 | float16 | ck | 0.125 | 0.074 | 1.68x |
+| batch | N=2, C=64→64, 16x16x16, k=3, s=1, p=1 | float16 | ck | 0.267 | 0.141 | 1.89x |
+| batch | N=4, C=64→64, 16x16x16, k=3, s=1, p=1 | float16 | ck | 0.509 | 0.093 | 5.49x |
+| batch | N=8, C=64→64, 16x16x16, k=3, s=1, p=1 | float16 | ck | 0.989 | 0.156 | 6.35x |
+| anisotropic | N=2, C=32→32, 8x64x64, k=3, s=1, p=1 | float16 | ck | 0.891 | 0.129 | 6.93x |
+| anisotropic | N=1, C=128→128, 4x16x16, k=3, s=1, p=1 | float16 | ck | 0.152 | 0.163 | 0.93x |
+| anisotropic | N=1, C=64→64, 32x32x8, k=3, s=1, p=1 | float16 | ck | 0.247 | 0.146 | 1.70x |
+| stride_padding | N=1, C=64→64, 16x16x16, k=3, s=2, p=1 | float16 | ck | 0.158 | 0.186 | 0.85x |
+| stride_padding | N=1, C=64→64, 16x16x16, k=3, s=1, p=0 | float16 | ck | 0.185 | 0.144 | 1.28x |
+| stride_padding | N=1, C=64→64, 16x16x16, k=1, s=1, p=0 | float16 | ck | 0.173 | 0.183 | 0.95x |
+| stride_padding | N=1, C=64→64, 32x32x32, k=3, s=2, p=1 | float16 | ck | 0.176 | 0.159 | 1.11x |
+| dtype | N=1, C=64→64, 16x16x16, k=3, s=1, p=1 | float16 | ck | 0.131 | 0.076 | 1.73x |
+| dtype | N=1, C=64→64, 16x16x16, k=3, s=1, p=1 | bfloat16 | ck | 0.200 | 0.146 | 1.37x |
+| dtype | N=1, C=64→64, 16x16x16, k=3, s=1, p=1 | float32 | native | 0.225 | 0.437 | 0.52x |
+| channels_asym | N=1, C=32→128, 16x16x16, k=3, s=1, p=1 | float16 | ck | 0.075 | 0.072 | 1.04x |
+| channels_asym | N=1, C=128→32, 16x16x16, k=3, s=1, p=1 | float16 | ck | 0.235 | 0.072 | 3.27x |
+| large_kernel | N=1, C=32→32, 32x32x32, k=15, s=1, p=7 | float16 | ck | 57.797 | 4.962 | 11.65x |
+| large_kernel | N=1, C=32→32, 32x32x32, k=15, s=1, p=7 | float32 | fftconv | 82.064 | 15.281 | 5.37x |
+
+</details>
+
 ## Installation
 
 Linux only (ROCm is Linux-first). Requires a ROCm PyTorch build for your target GPU.

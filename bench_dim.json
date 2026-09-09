@@ -1,0 +1,1163 @@
+{
+    "schema_version": 1,
+    "generated_at": "2026-09-09T23:23:43+0200",
+    "harness": "tools/bench_conv3d_sweep.py",
+    "method": "F.conv3d called with amd_tuned_torch.disable() vs .enable(); min of alternating rounds; CUDA-event timed; winner read from kernel_select.cached()",
+    "rounds": 3,
+    "budget_ms": 60.0,
+    "wall_time_s": 18.286,
+    "system": {
+        "gpu_name": "AMD Radeon RX 7900 XTX",
+        "rocm_version": "7.2.53211",
+        "cuda_version": null,
+        "torch_version": "2.15.0.dev20260820+rocm7.2",
+        "python_version": "3.10.20",
+        "platform": "Linux-7.0.0-31-generic-x86_64-with-glibc2.43",
+        "pcie": {
+            "link_speed": "2.5 GT/s PCIe",
+            "link_width": "1"
+        },
+        "device_key": "AMD_Radeon_RX_7900_XTX-torch-2.15.0.dev20260820_rocm7.2-cp310",
+        "amd_tuned_torch": "/home/wiffzack/optimiert/amd_tools/source/cmp_ext_turing/amd_tuned_torch",
+        "checkout": "/home/wiffzack/optimiert/amd_tools/source/cmp_ext_turing",
+        "checkout_matches": true
+    },
+    "backends_available": {
+        "aiter_ops": false,
+        "hipblaslt_ops": true,
+        "ck_gemm_ops": true,
+        "te_ops": false,
+        "flash_attn_rocwmma_ops": true,
+        "depthwise_conv1d_ops": true,
+        "fftconv_ops": true
+    },
+    "config": {
+        "sparse_conv3d_enabled": true,
+        "kernel_select_enabled": true,
+        "AMD_TUNED_TORCH_SPARSE_CONV3D": null
+    },
+    "summary": {
+        "cases_timed": 38,
+        "cases_failed": 0,
+        "winners": {
+            "ck": 30,
+            "native": 3,
+            "stock": 2,
+            "fftconv": 3
+        },
+        "faster": 27,
+        "slower": 6,
+        "best": {
+            "case": "large_kernel/N1_C32to32_32x32x32_k15_s1p7_float16",
+            "speedup": 11.6470476091973
+        },
+        "worst": {
+            "case": "dtype/N1_C64to64_16x16x16_k3_s1p1_float32",
+            "speedup": 0.5157543219857192
+        }
+    },
+    "cases": {
+        "kernel_size/N1_C16to16_16x16x16_k1_s1p0_float16": {
+            "group": "kernel_size",
+            "shape": "N=1, C=16->16, 16x16x16, k=1, stride=1, pad=0",
+            "dtype": "float16",
+            "gflops": 0.002,
+            "winner": "ck",
+            "stock_ms": 0.062365727653669996,
+            "patched_ms": 0.06492165280252785,
+            "rounds_ms": {
+                "stock": [
+                    0.0627,
+                    0.0624,
+                    0.1171
+                ],
+                "patched": [
+                    0.0649,
+                    0.113,
+                    0.1223
+                ]
+            },
+            "speedup": 0.9606306210867397,
+            "patched_tflops": 0.03230281284395063,
+            "max_abs_err": 0.0,
+            "max_rel_err": 0.0,
+            "iters": {
+                "stock": 229,
+                "patched": 331
+            }
+        },
+        "kernel_size/N1_C16to16_16x16x16_k1_s1p0_float32": {
+            "group": "kernel_size",
+            "shape": "N=1, C=16->16, 16x16x16, k=1, stride=1, pad=0",
+            "dtype": "float32",
+            "gflops": 0.002,
+            "winner": "native",
+            "stock_ms": 0.17884410384797703,
+            "patched_ms": 0.21485415831306912,
+            "rounds_ms": {
+                "stock": [
+                    0.1945,
+                    0.1788,
+                    0.2113
+                ],
+                "patched": [
+                    0.2288,
+                    0.2459,
+                    0.2149
+                ]
+            },
+            "speedup": 0.8323976843277058,
+            "patched_tflops": 0.00976081643690689,
+            "max_abs_err": 0.0,
+            "max_rel_err": 0.0,
+            "iters": {
+                "stock": 274,
+                "patched": 302
+            }
+        },
+        "kernel_size/N1_C16to16_16x16x16_k3_s1p1_float16": {
+            "group": "kernel_size",
+            "shape": "N=1, C=16->16, 16x16x16, k=3, stride=1, pad=1",
+            "dtype": "float16",
+            "gflops": 0.057,
+            "winner": "ck",
+            "stock_ms": 0.15376481690814503,
+            "patched_ms": 0.15379054081904422,
+            "rounds_ms": {
+                "stock": [
+                    0.2246,
+                    0.1538,
+                    0.1892
+                ],
+                "patched": [
+                    0.1925,
+                    0.1552,
+                    0.1538
+                ]
+            },
+            "speedup": 0.999832734115101,
+            "patched_tflops": 0.36818326860964024,
+            "max_abs_err": 0.03125,
+            "max_rel_err": 0.0003257328990228013,
+            "iters": {
+                "stock": 269,
+                "patched": 385
+            }
+        },
+        "kernel_size/N1_C16to16_16x16x16_k3_s1p1_float32": {
+            "group": "kernel_size",
+            "shape": "N=1, C=16->16, 16x16x16, k=3, stride=1, pad=1",
+            "dtype": "float32",
+            "gflops": 0.057,
+            "winner": "native",
+            "stock_ms": 0.16063247626362323,
+            "patched_ms": 0.13906938825334822,
+            "rounds_ms": {
+                "stock": [
+                    0.1606,
+                    0.2437,
+                    0.1878
+                ],
+                "patched": [
+                    0.1426,
+                    0.171,
+                    0.1391
+                ]
+            },
+            "speedup": 1.15505272785836,
+            "patched_tflops": 0.4071572091540911,
+            "max_abs_err": 0.0,
+            "max_rel_err": 0.0,
+            "iters": {
+                "stock": 281,
+                "patched": 175
+            }
+        },
+        "kernel_size/N1_C16to16_16x16x16_k5_s1p2_float16": {
+            "group": "kernel_size",
+            "shape": "N=1, C=16->16, 16x16x16, k=5, stride=1, pad=2",
+            "dtype": "float16",
+            "gflops": 0.262,
+            "winner": "ck",
+            "stock_ms": 0.15891048919533102,
+            "patched_ms": 0.1451260110606318,
+            "rounds_ms": {
+                "stock": [
+                    0.1833,
+                    0.1589,
+                    0.1835
+                ],
+                "patched": [
+                    0.1451,
+                    0.1577,
+                    0.1832
+                ]
+            },
+            "speedup": 1.094982822403492,
+            "patched_tflops": 1.8063198876904263,
+            "max_abs_err": 0.0625,
+            "max_rel_err": 0.0003748125937031484,
+            "iters": {
+                "stock": 211,
+                "patched": 345
+            }
+        },
+        "kernel_size/N1_C16to16_16x16x16_k5_s1p2_float32": {
+            "group": "kernel_size",
+            "shape": "N=1, C=16->16, 16x16x16, k=5, stride=1, pad=2",
+            "dtype": "float32",
+            "gflops": 0.262,
+            "winner": "stock",
+            "stock_ms": 0.21693398875574912,
+            "patched_ms": 0.2646920604090537,
+            "rounds_ms": {
+                "stock": [
+                    0.2589,
+                    0.2169,
+                    0.2514
+                ],
+                "patched": [
+                    0.2936,
+                    0.2647,
+                    0.3108
+                ]
+            },
+            "speedup": 0.8195711968863006,
+            "patched_tflops": 0.9903734913502281,
+            "max_abs_err": 0.0,
+            "max_rel_err": 0.0,
+            "iters": {
+                "stock": 124,
+                "patched": 124
+            }
+        },
+        "kernel_size/N1_C16to16_16x16x16_k7_s1p3_float16": {
+            "group": "kernel_size",
+            "shape": "N=1, C=16->16, 16x16x16, k=7, stride=1, pad=3",
+            "dtype": "float16",
+            "gflops": 0.719,
+            "winner": "ck",
+            "stock_ms": 0.3767925838254533,
+            "patched_ms": 0.07450502955780597,
+            "rounds_ms": {
+                "stock": [
+                    0.394,
+                    0.3768,
+                    0.4305
+                ],
+                "patched": [
+                    0.0745,
+                    0.2122,
+                    0.2108
+                ]
+            },
+            "speedup": 5.057277153794194,
+            "patched_tflops": 9.65469231096541,
+            "max_abs_err": 0.125,
+            "max_rel_err": 0.00037678975131876413,
+            "iters": {
+                "stock": 106,
+                "patched": 269
+            }
+        },
+        "kernel_size/N1_C16to16_16x16x16_k7_s1p3_float32": {
+            "group": "kernel_size",
+            "shape": "N=1, C=16->16, 16x16x16, k=7, stride=1, pad=3",
+            "dtype": "float32",
+            "gflops": 0.719,
+            "winner": "stock",
+            "stock_ms": 0.4406329415061257,
+            "patched_ms": 0.44595686594645184,
+            "rounds_ms": {
+                "stock": [
+                    0.5358,
+                    0.4555,
+                    0.4406
+                ],
+                "patched": [
+                    0.4519,
+                    0.4715,
+                    0.446
+                ]
+            },
+            "speedup": 0.9880617951042704,
+            "patched_tflops": 1.6129881406206952,
+            "max_abs_err": 0.0,
+            "max_rel_err": 0.0,
+            "iters": {
+                "stock": 55,
+                "patched": 60
+            }
+        },
+        "kernel_size/N1_C16to16_16x16x16_k9_s1p4_float16": {
+            "group": "kernel_size",
+            "shape": "N=1, C=16->16, 16x16x16, k=9, stride=1, pad=4",
+            "dtype": "float16",
+            "gflops": 1.529,
+            "winner": "ck",
+            "stock_ms": 0.7272421700613839,
+            "patched_ms": 0.1468710699746775,
+            "rounds_ms": {
+                "stock": [
+                    0.7827,
+                    0.7408,
+                    0.7272
+                ],
+                "patched": [
+                    0.1743,
+                    0.1469,
+                    0.1791
+                ]
+            },
+            "speedup": 4.951568543667381,
+            "patched_tflops": 10.40929168871439,
+            "max_abs_err": 0.25,
+            "max_rel_err": 0.0005417118093174431,
+            "iters": {
+                "stock": 70,
+                "patched": 215
+            }
+        },
+        "kernel_size/N1_C16to16_16x16x16_k9_s1p4_float32": {
+            "group": "kernel_size",
+            "shape": "N=1, C=16->16, 16x16x16, k=9, stride=1, pad=4",
+            "dtype": "float32",
+            "gflops": 1.529,
+            "winner": "fftconv",
+            "stock_ms": 2.91231369972229,
+            "patched_ms": 0.9258764015053803,
+            "rounds_ms": {
+                "stock": [
+                    2.9123,
+                    3.1294,
+                    3.1046
+                ],
+                "patched": [
+                    2.0488,
+                    2.1324,
+                    0.9259
+                ]
+            },
+            "speedup": 3.145467035326925,
+            "patched_tflops": 1.6512180303054371,
+            "max_abs_err": 0.001800537109375,
+            "max_rel_err": 4.127405884127767e-06,
+            "iters": {
+                "stock": 8,
+                "patched": 53
+            }
+        },
+        "kernel_size/N1_C16to16_16x16x16_k15_s1p7_float16": {
+            "group": "kernel_size",
+            "shape": "N=1, C=16->16, 16x16x16, k=15, stride=1, pad=7",
+            "dtype": "float16",
+            "gflops": 7.078,
+            "winner": "ck",
+            "stock_ms": 3.198136329650879,
+            "patched_ms": 0.5421856724938681,
+            "rounds_ms": {
+                "stock": [
+                    3.3579,
+                    3.2991,
+                    3.1981
+                ],
+                "patched": [
+                    0.5607,
+                    0.5456,
+                    0.5422
+                ]
+            },
+            "speedup": 5.89859985591384,
+            "patched_tflops": 13.05436192631971,
+            "max_abs_err": 0.25,
+            "max_rel_err": 0.00032425421530479895,
+            "iters": {
+                "stock": 12,
+                "patched": 86
+            }
+        },
+        "kernel_size/N1_C16to16_16x16x16_k15_s1p7_float32": {
+            "group": "kernel_size",
+            "shape": "N=1, C=16->16, 16x16x16, k=15, stride=1, pad=7",
+            "dtype": "float32",
+            "gflops": 7.078,
+            "winner": "fftconv",
+            "stock_ms": 8.606483459472656,
+            "patched_ms": 0.8660088539123535,
+            "rounds_ms": {
+                "stock": [
+                    9.6495,
+                    8.6065,
+                    9.777
+                ],
+                "patched": [
+                    0.866,
+                    2.1925,
+                    2.8003
+                ]
+            },
+            "speedup": 9.93810100276838,
+            "patched_tflops": 8.172997271360847,
+            "max_abs_err": 0.0057373046875,
+            "max_rel_err": 6.725750235973663e-06,
+            "iters": {
+                "stock": 7,
+                "patched": 40
+            }
+        },
+        "spatial/N1_C64to64_8x8x8_k3_s1p1_float16": {
+            "group": "spatial",
+            "shape": "N=1, C=64->64, 8x8x8, k=3, stride=1, pad=1",
+            "dtype": "float16",
+            "gflops": 0.113,
+            "winner": "ck",
+            "stock_ms": 0.17219744649941865,
+            "patched_ms": 0.1281140368917714,
+            "rounds_ms": {
+                "stock": [
+                    0.1722,
+                    0.1783,
+                    0.1744
+                ],
+                "patched": [
+                    0.1281,
+                    0.1737,
+                    0.198
+                ]
+            },
+            "speedup": 1.3440950787062325,
+            "patched_tflops": 0.8839484786172846,
+            "max_abs_err": 0.0625,
+            "max_rel_err": 0.0003489183531053733,
+            "iters": {
+                "stock": 383,
+                "patched": 276
+            }
+        },
+        "spatial/N1_C64to64_16x16x16_k3_s1p1_float16": {
+            "group": "spatial",
+            "shape": "N=1, C=64->64, 16x16x16, k=3, stride=1, pad=1",
+            "dtype": "float16",
+            "gflops": 0.906,
+            "winner": "ck",
+            "stock_ms": 0.19795755731979472,
+            "patched_ms": 0.14902274709352306,
+            "rounds_ms": {
+                "stock": [
+                    0.198,
+                    0.2092,
+                    0.2174
+                ],
+                "patched": [
+                    0.208,
+                    0.1906,
+                    0.149
+                ]
+            },
+            "speedup": 1.328371414302015,
+            "patched_tflops": 6.07940520269322,
+            "max_abs_err": 0.125,
+            "max_rel_err": 0.0005903187721369539,
+            "iters": {
+                "stock": 149,
+                "patched": 284
+            }
+        },
+        "spatial/N1_C64to64_32x32x32_k3_s1p1_float16": {
+            "group": "spatial",
+            "shape": "N=1, C=64->64, 32x32x32, k=3, stride=1, pad=1",
+            "dtype": "float16",
+            "gflops": 7.248,
+            "winner": "ck",
+            "stock_ms": 0.9076372419084822,
+            "patched_ms": 0.1902272931991085,
+            "rounds_ms": {
+                "stock": [
+                    1.2098,
+                    0.9217,
+                    0.9076
+                ],
+                "patched": [
+                    0.2242,
+                    0.1902,
+                    0.238
+                ]
+            },
+            "speedup": 4.771330268356759,
+            "patched_tflops": 38.10051223519153,
+            "max_abs_err": 0.125,
+            "max_rel_err": 0.0005793742757821553,
+            "iters": {
+                "stock": 35,
+                "patched": 124
+            }
+        },
+        "spatial/N1_C64to64_48x48x48_k3_s1p1_float16": {
+            "group": "spatial",
+            "shape": "N=1, C=64->64, 48x48x48, k=3, stride=1, pad=1",
+            "dtype": "float16",
+            "gflops": 24.461,
+            "winner": "ck",
+            "stock_ms": 3.2005938361672794,
+            "patched_ms": 0.5479375706162564,
+            "rounds_ms": {
+                "stock": [
+                    3.2006,
+                    3.2426,
+                    3.3889
+                ],
+                "patched": [
+                    0.5479,
+                    0.5648,
+                    0.5687
+                ]
+            },
+            "speedup": 5.841165139611843,
+            "patched_tflops": 44.64227722236479,
+            "max_abs_err": 0.125,
+            "max_rel_err": 0.0005473453749315818,
+            "iters": {
+                "stock": 17,
+                "patched": 86
+            }
+        },
+        "channels/N1_C32to32_16x16x16_k3_s1p1_float16": {
+            "group": "channels",
+            "shape": "N=1, C=32->32, 16x16x16, k=3, stride=1, pad=1",
+            "dtype": "float16",
+            "gflops": 0.226,
+            "winner": "ck",
+            "stock_ms": 0.07237571941304143,
+            "patched_ms": 0.0713878075281779,
+            "rounds_ms": {
+                "stock": [
+                    0.0724,
+                    0.0724,
+                    0.0726
+                ],
+                "patched": [
+                    0.0714,
+                    0.0717,
+                    0.0719
+                ]
+            },
+            "speedup": 1.0138386640390038,
+            "patched_tflops": 3.1727044693255197,
+            "max_abs_err": 0.0625,
+            "max_rel_err": 0.0004608294930875576,
+            "iters": {
+                "stock": 373,
+                "patched": 432
+            }
+        },
+        "channels/N1_C64to64_16x16x16_k3_s1p1_float16": {
+            "group": "channels",
+            "shape": "N=1, C=64->64, 16x16x16, k=3, stride=1, pad=1",
+            "dtype": "float16",
+            "gflops": 0.906,
+            "winner": "ck",
+            "stock_ms": 0.12515935590190272,
+            "patched_ms": 0.07285648634453781,
+            "rounds_ms": {
+                "stock": [
+                    0.1298,
+                    0.1254,
+                    0.1252
+                ],
+                "patched": [
+                    0.0729,
+                    0.0735,
+                    0.076
+                ]
+            },
+            "speedup": 1.7178889922034533,
+            "patched_tflops": 12.434989792338815,
+            "max_abs_err": 0.0625,
+            "max_rel_err": 0.00034129692832764505,
+            "iters": {
+                "stock": 310,
+                "patched": 476
+            }
+        },
+        "channels/N1_C128to128_16x16x16_k3_s1p1_float16": {
+            "group": "channels",
+            "shape": "N=1, C=128->128, 16x16x16, k=3, stride=1, pad=1",
+            "dtype": "float16",
+            "gflops": 3.624,
+            "winner": "ck",
+            "stock_ms": 0.2513697763507286,
+            "patched_ms": 0.08724854472925454,
+            "rounds_ms": {
+                "stock": [
+                    0.2651,
+                    0.2582,
+                    0.2514
+                ],
+                "patched": [
+                    0.0932,
+                    0.0872,
+                    0.0874
+                ]
+            },
+            "speedup": 2.881077009717092,
+            "patched_tflops": 41.53511863430438,
+            "max_abs_err": 0.125,
+            "max_rel_err": 0.0004420866489832007,
+            "iters": {
+                "stock": 178,
+                "patched": 263
+            }
+        },
+        "channels/N1_C256to256_16x16x16_k3_s1p1_float16": {
+            "group": "channels",
+            "shape": "N=1, C=256->256, 16x16x16, k=3, stride=1, pad=1",
+            "dtype": "float16",
+            "gflops": 14.496,
+            "winner": "ck",
+            "stock_ms": 0.6198135463670752,
+            "patched_ms": 0.2524683615740608,
+            "rounds_ms": {
+                "stock": [
+                    0.6297,
+                    0.6198,
+                    0.6417
+                ],
+                "patched": [
+                    0.2599,
+                    0.2525,
+                    0.265
+                ]
+            },
+            "speedup": 2.455014729381269,
+            "patched_tflops": 57.415172870077775,
+            "max_abs_err": 0.25,
+            "max_rel_err": 0.0005324813631522897,
+            "iters": {
+                "stock": 87,
+                "patched": 17
+            }
+        },
+        "batch/N1_C64to64_16x16x16_k3_s1p1_float16": {
+            "group": "batch",
+            "shape": "N=1, C=64->64, 16x16x16, k=3, stride=1, pad=1",
+            "dtype": "float16",
+            "gflops": 0.906,
+            "winner": "ck",
+            "stock_ms": 0.12509886102644283,
+            "patched_ms": 0.07449538590478115,
+            "rounds_ms": {
+                "stock": [
+                    0.1251,
+                    0.1607,
+                    0.2086
+                ],
+                "patched": [
+                    0.0745,
+                    0.1763,
+                    0.2121
+                ]
+            },
+            "speedup": 1.6792833476470912,
+            "patched_tflops": 12.161419838243356,
+            "max_abs_err": 0.125,
+            "max_rel_err": 0.0005668934240362812,
+            "iters": {
+                "stock": 297,
+                "patched": 488
+            }
+        },
+        "batch/N2_C64to64_16x16x16_k3_s1p1_float16": {
+            "group": "batch",
+            "shape": "N=2, C=64->64, 16x16x16, k=3, stride=1, pad=1",
+            "dtype": "float16",
+            "gflops": 1.812,
+            "winner": "ck",
+            "stock_ms": 0.2667014439900716,
+            "patched_ms": 0.14109495844706954,
+            "rounds_ms": {
+                "stock": [
+                    0.3617,
+                    0.2995,
+                    0.2667
+                ],
+                "patched": [
+                    0.1839,
+                    0.1577,
+                    0.1411
+                ]
+            },
+            "speedup": 1.8902266028883108,
+            "patched_tflops": 12.841984915284781,
+            "max_abs_err": 0.125,
+            "max_rel_err": 0.0005871990604815032,
+            "iters": {
+                "stock": 90,
+                "patched": 249
+            }
+        },
+        "batch/N4_C64to64_16x16x16_k3_s1p1_float16": {
+            "group": "batch",
+            "shape": "N=4, C=64->64, 16x16x16, k=3, stride=1, pad=1",
+            "dtype": "float16",
+            "gflops": 3.624,
+            "winner": "ck",
+            "stock_ms": 0.5088518928079044,
+            "patched_ms": 0.09260869026184082,
+            "rounds_ms": {
+                "stock": [
+                    0.5263,
+                    0.5263,
+                    0.5089
+                ],
+                "patched": [
+                    0.1036,
+                    0.0996,
+                    0.0926
+                ]
+            },
+            "speedup": 5.49464517173477,
+            "patched_tflops": 39.1310863565167,
+            "max_abs_err": 0.125,
+            "max_rel_err": 0.0005889281507656066,
+            "iters": {
+                "stock": 68,
+                "patched": 288
+            }
+        },
+        "batch/N8_C64to64_16x16x16_k3_s1p1_float16": {
+            "group": "batch",
+            "shape": "N=8, C=64->64, 16x16x16, k=3, stride=1, pad=1",
+            "dtype": "float16",
+            "gflops": 7.248,
+            "winner": "ck",
+            "stock_ms": 0.9893448569557883,
+            "patched_ms": 0.15580072656141974,
+            "rounds_ms": {
+                "stock": [
+                    0.9893,
+                    0.9941,
+                    1.0284
+                ],
+                "patched": [
+                    0.1558,
+                    0.1601,
+                    0.1607
+                ]
+            },
+            "speedup": 6.350065746104008,
+            "patched_tflops": 46.51940637223402,
+            "max_abs_err": 0.125,
+            "max_rel_err": 0.0005820721769499418,
+            "iters": {
+                "stock": 55,
+                "patched": 226
+            }
+        },
+        "anisotropic/N2_C32to32_8x64x64_k3_s1p1_float16": {
+            "group": "anisotropic",
+            "shape": "N=2, C=32->32, 8x64x64, k=3, stride=1, pad=1",
+            "dtype": "float16",
+            "gflops": 3.624,
+            "winner": "ck",
+            "stock_ms": 0.8905848185221354,
+            "patched_ms": 0.12851685744065505,
+            "rounds_ms": {
+                "stock": [
+                    0.8906,
+                    0.8953,
+                    0.8919
+                ],
+                "patched": [
+                    0.129,
+                    0.1286,
+                    0.1285
+                ]
+            },
+            "speedup": 6.929712072467838,
+            "patched_tflops": 28.197691168050778,
+            "max_abs_err": 0.09375,
+            "max_rel_err": 0.0006426735218508997,
+            "iters": {
+                "stock": 60,
+                "patched": 247
+            }
+        },
+        "anisotropic/N1_C128to128_4x16x16_k3_s1p1_float16": {
+            "group": "anisotropic",
+            "shape": "N=1, C=128->128, 4x16x16, k=3, stride=1, pad=1",
+            "dtype": "float16",
+            "gflops": 0.906,
+            "winner": "ck",
+            "stock_ms": 0.15234418377828438,
+            "patched_ms": 0.16306660002078152,
+            "rounds_ms": {
+                "stock": [
+                    0.157,
+                    0.2283,
+                    0.1523
+                ],
+                "patched": [
+                    0.1631,
+                    0.2154,
+                    0.1848
+                ]
+            },
+            "speedup": 0.9342451719657449,
+            "patched_tflops": 5.555826048280528,
+            "max_abs_err": 0.125,
+            "max_rel_err": 0.00048216007714561236,
+            "iters": {
+                "stock": 299,
+                "patched": 289
+            }
+        },
+        "anisotropic/N1_C64to64_32x32x8_k3_s1p1_float16": {
+            "group": "anisotropic",
+            "shape": "N=1, C=64->64, 32x32x8, k=3, stride=1, pad=1",
+            "dtype": "float16",
+            "gflops": 1.812,
+            "winner": "ck",
+            "stock_ms": 0.24723679391961348,
+            "patched_ms": 0.14574991303049165,
+            "rounds_ms": {
+                "stock": [
+                    0.2969,
+                    0.2561,
+                    0.2472
+                ],
+                "patched": [
+                    0.1457,
+                    0.1563,
+                    0.153
+                ]
+            },
+            "speedup": 1.6963083461181225,
+            "patched_tflops": 12.431838141961244,
+            "max_abs_err": 0.125,
+            "max_rel_err": 0.000612369871402327,
+            "iters": {
+                "stock": 95,
+                "patched": 273
+            }
+        },
+        "stride_padding/N1_C64to64_16x16x16_k3_s2p1_float16": {
+            "group": "stride_padding",
+            "shape": "N=1, C=64->64, 16x16x16, k=3, stride=2, pad=1",
+            "dtype": "float16",
+            "gflops": 0.113,
+            "winner": "ck",
+            "stock_ms": 0.15840760385730365,
+            "patched_ms": 0.18551768252724096,
+            "rounds_ms": {
+                "stock": [
+                    0.1958,
+                    0.1584,
+                    0.1603
+                ],
+                "patched": [
+                    0.2366,
+                    0.2042,
+                    0.1855
+                ]
+            },
+            "speedup": 0.8538679531749943,
+            "patched_tflops": 0.6104334986147275,
+            "max_abs_err": 0.0625,
+            "max_rel_err": 0.00036845983787767134,
+            "iters": {
+                "stock": 413,
+                "patched": 380
+            }
+        },
+        "stride_padding/N1_C64to64_16x16x16_k3_s1p0_float16": {
+            "group": "stride_padding",
+            "shape": "N=1, C=64->64, 16x16x16, k=3, stride=1, pad=0",
+            "dtype": "float16",
+            "gflops": 0.607,
+            "winner": "ck",
+            "stock_ms": 0.18474000814009686,
+            "patched_ms": 0.14436698821653804,
+            "rounds_ms": {
+                "stock": [
+                    0.1847,
+                    0.2226,
+                    0.2051
+                ],
+                "patched": [
+                    0.1764,
+                    0.1444,
+                    0.2181
+                ]
+            },
+            "speedup": 1.2796554837245948,
+            "patched_tflops": 4.204069805000427,
+            "max_abs_err": 0.125,
+            "max_rel_err": 0.0006724949562878278,
+            "iters": {
+                "stock": 196,
+                "patched": 332
+            }
+        },
+        "stride_padding/N1_C64to64_16x16x16_k1_s1p0_float16": {
+            "group": "stride_padding",
+            "shape": "N=1, C=64->64, 16x16x16, k=1, stride=1, pad=0",
+            "dtype": "float16",
+            "gflops": 0.034,
+            "winner": "ck",
+            "stock_ms": 0.17322344346479937,
+            "patched_ms": 0.18279478821573378,
+            "rounds_ms": {
+                "stock": [
+                    0.187,
+                    0.1732,
+                    0.2309
+                ],
+                "patched": [
+                    0.202,
+                    0.2259,
+                    0.1828
+                ]
+            },
+            "speedup": 0.9476388531403951,
+            "patched_tflops": 0.18356339547492556,
+            "max_abs_err": 0.0,
+            "max_rel_err": 0.0,
+            "iters": {
+                "stock": 440,
+                "patched": 395
+            }
+        },
+        "stride_padding/N1_C64to64_32x32x32_k3_s2p1_float16": {
+            "group": "stride_padding",
+            "shape": "N=1, C=64->64, 32x32x32, k=3, stride=2, pad=1",
+            "dtype": "float16",
+            "gflops": 0.906,
+            "winner": "ck",
+            "stock_ms": 0.17640042304992676,
+            "patched_ms": 0.15910296459274598,
+            "rounds_ms": {
+                "stock": [
+                    0.2469,
+                    0.1938,
+                    0.1764
+                ],
+                "patched": [
+                    0.1692,
+                    0.1591,
+                    0.1641
+                ]
+            },
+            "speedup": 1.1087186433103675,
+            "patched_tflops": 5.694234964879505,
+            "max_abs_err": 0.125,
+            "max_rel_err": 0.0005820721769499418,
+            "iters": {
+                "stock": 152,
+                "patched": 249
+            }
+        },
+        "dtype/N1_C64to64_16x16x16_k3_s1p1_float16": {
+            "group": "dtype",
+            "shape": "N=1, C=64->64, 16x16x16, k=3, stride=1, pad=1",
+            "dtype": "float16",
+            "gflops": 0.906,
+            "winner": "ck",
+            "stock_ms": 0.1307578042288807,
+            "patched_ms": 0.07579695684669992,
+            "rounds_ms": {
+                "stock": [
+                    0.155,
+                    0.1308,
+                    0.1312
+                ],
+                "patched": [
+                    0.0758,
+                    0.1269,
+                    0.1435
+                ]
+            },
+            "speedup": 1.7251062531882333,
+            "patched_tflops": 11.9525862473916,
+            "max_abs_err": 0.125,
+            "max_rel_err": 0.0006756756756756757,
+            "iters": {
+                "stock": 214,
+                "patched": 338
+            }
+        },
+        "dtype/N1_C64to64_16x16x16_k3_s1p1_bfloat16": {
+            "group": "dtype",
+            "shape": "N=1, C=64->64, 16x16x16, k=3, stride=1, pad=1",
+            "dtype": "bfloat16",
+            "gflops": 0.906,
+            "winner": "ck",
+            "stock_ms": 0.1996201777803725,
+            "patched_ms": 0.14582580283836083,
+            "rounds_ms": {
+                "stock": [
+                    0.1996,
+                    0.218,
+                    0.2664
+                ],
+                "patched": [
+                    0.1458,
+                    0.2176,
+                    0.1799
+                ]
+            },
+            "speedup": 1.3688947627577235,
+            "patched_tflops": 6.212684218884179,
+            "max_abs_err": 0.5,
+            "max_rel_err": 0.0026595744680851063,
+            "iters": {
+                "stock": 138,
+                "patched": 270
+            }
+        },
+        "dtype/N1_C64to64_16x16x16_k3_s1p1_float32": {
+            "group": "dtype",
+            "shape": "N=1, C=64->64, 16x16x16, k=3, stride=1, pad=1",
+            "dtype": "float32",
+            "gflops": 0.906,
+            "winner": "native",
+            "stock_ms": 0.22535972224855885,
+            "patched_ms": 0.4369516892866655,
+            "rounds_ms": {
+                "stock": [
+                    0.322,
+                    0.2256,
+                    0.2254
+                ],
+                "patched": [
+                    0.4642,
+                    0.4451,
+                    0.437
+                ]
+            },
+            "speedup": 0.5157543219857192,
+            "patched_tflops": 2.073386340441933,
+            "max_abs_err": 0.0,
+            "max_rel_err": 0.0,
+            "iters": {
+                "stock": 103,
+                "patched": 55
+            }
+        },
+        "channels_asym/N1_C32to128_16x16x16_k3_s1p1_float16": {
+            "group": "channels_asym",
+            "shape": "N=1, C=32->128, 16x16x16, k=3, stride=1, pad=1",
+            "dtype": "float16",
+            "gflops": 0.906,
+            "winner": "ck",
+            "stock_ms": 0.07473378445668082,
+            "patched_ms": 0.07201634990095528,
+            "rounds_ms": {
+                "stock": [
+                    0.0757,
+                    0.0749,
+                    0.0747
+                ],
+                "patched": [
+                    0.0729,
+                    0.0745,
+                    0.072
+                ]
+            },
+            "speedup": 1.0377335779925372,
+            "patched_tflops": 12.580055296415162,
+            "max_abs_err": 0.0625,
+            "max_rel_err": 0.0004201680672268908,
+            "iters": {
+                "stock": 379,
+                "patched": 422
+            }
+        },
+        "channels_asym/N1_C128to32_16x16x16_k3_s1p1_float16": {
+            "group": "channels_asym",
+            "shape": "N=1, C=128->32, 16x16x16, k=3, stride=1, pad=1",
+            "dtype": "float16",
+            "gflops": 0.906,
+            "winner": "ck",
+            "stock_ms": 0.2349628155048077,
+            "patched_ms": 0.07175986921016257,
+            "rounds_ms": {
+                "stock": [
+                    0.2401,
+                    0.235,
+                    0.2351
+                ],
+                "patched": [
+                    0.0721,
+                    0.0726,
+                    0.0718
+                ]
+            },
+            "speedup": 3.274292694384293,
+            "patched_tflops": 12.625018328094965,
+            "max_abs_err": 0.125,
+            "max_rel_err": 0.0004970178926441351,
+            "iters": {
+                "stock": 195,
+                "patched": 402
+            }
+        },
+        "large_kernel/N1_C32to32_32x32x32_k15_s1p7_float16": {
+            "group": "large_kernel",
+            "shape": "N=1, C=32->32, 32x32x32, k=15, stride=1, pad=7",
+            "dtype": "float16",
+            "gflops": 226.492,
+            "winner": "ck",
+            "stock_ms": 57.7969970703125,
+            "patched_ms": 4.962373213334517,
+            "rounds_ms": {
+                "stock": [
+                    57.8095,
+                    57.8367,
+                    57.797
+                ],
+                "patched": [
+                    4.9624,
+                    5.192,
+                    5.0656
+                ]
+            },
+            "speedup": 11.6470476091973,
+            "patched_tflops": 45.641955222429985,
+            "max_abs_err": 1.0,
+            "max_rel_err": 0.0006657789613848203,
+            "iters": {
+                "stock": 5,
+                "patched": 11
+            }
+        },
+        "large_kernel/N1_C32to32_32x32x32_k15_s1p7_float32": {
+            "group": "large_kernel",
+            "shape": "N=1, C=32->32, 32x32x32, k=15, stride=1, pad=7",
+            "dtype": "float32",
+            "gflops": 226.492,
+            "winner": "fftconv",
+            "stock_ms": 82.06393432617188,
+            "patched_ms": 15.281390380859374,
+            "rounds_ms": {
+                "stock": [
+                    82.0639,
+                    83.7,
+                    83.4807
+                ],
+                "patched": [
+                    15.2814,
+                    17.2773,
+                    17.9728
+                ]
+            },
+            "speedup": 5.37018767801133,
+            "patched_tflops": 14.821453438143422,
+            "max_abs_err": 0.0196533203125,
+            "max_rel_err": 1.2228929819766842e-05,
+            "iters": {
+                "stock": 5,
+                "patched": 5
+            }
+        }
+    }
+}
