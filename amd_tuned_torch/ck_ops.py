@@ -92,3 +92,45 @@ def conv3d(input: torch.Tensor, weight: torch.Tensor, bias: Optional[torch.Tenso
            stride=1, padding=0, dilation=1) -> Optional[torch.Tensor]:
     """CK WMMA conv3d. None if unavailable or unsupported for this problem."""
     return _conv(input, weight, bias, stride, padding, dilation, ndim=3)
+
+
+def conv2d_backward_data(grad_output: torch.Tensor, weight: torch.Tensor,
+                         input_size: Sequence[int], stride=1, padding=0,
+                         dilation=1) -> Optional[torch.Tensor]:
+    """dL/dInput for a conv2d, via CK's WMMA backward-data device op
+    (source/cmp_ext_turing/src/cuda/ck_conv_bwd*.hpp -- the backward
+    sibling of `conv2d`'s forward, same fp16/bf16/groups=1/channels-last-
+    native constraints). None if unavailable or unsupported for this
+    problem -- the caller (amd_tuned_torch._dispatch._Conv2dFn) contests
+    this against stock via kernel_select exactly like the forward tier.
+
+    `input_size` is the original conv2d input's (N, C, H, W) shape --
+    needed because it can't always be recovered from grad_output/weight/
+    stride/padding alone (e.g. stride > 1 makes several input sizes map to
+    the same output size)."""
+    if not available() or not hasattr(_C, "ck_conv2d_backward_data"):
+        return None
+    if grad_output.dim() != 4 or weight.dim() != 4:
+        return None
+    if grad_output.dtype not in _CK_DTYPES or weight.dtype != grad_output.dtype:
+        return None
+    return _C.ck_conv2d_backward_data(grad_output, weight, list(input_size),
+                                      _as_list(stride, 2), _as_list(padding, 2),
+                                      _as_list(dilation, 2))
+
+
+def conv2d_backward_weight(input: torch.Tensor, grad_output: torch.Tensor,
+                           weight_size: Sequence[int], stride=1, padding=0,
+                           dilation=1) -> Optional[torch.Tensor]:
+    """dL/dWeight for a conv2d, via CK's WMMA backward-weight device op.
+    None if unavailable or unsupported. `weight_size` is the (K, C, Kh, Kw)
+    shape of the weight gradient to produce. See `conv2d_backward_data`."""
+    if not available() or not hasattr(_C, "ck_conv2d_backward_weight"):
+        return None
+    if input.dim() != 4 or grad_output.dim() != 4:
+        return None
+    if input.dtype not in _CK_DTYPES or grad_output.dtype != input.dtype:
+        return None
+    return _C.ck_conv2d_backward_weight(input, grad_output, list(weight_size),
+                                        _as_list(stride, 2), _as_list(padding, 2),
+                                        _as_list(dilation, 2))

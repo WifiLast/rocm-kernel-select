@@ -18,6 +18,7 @@
 
 #ifdef AMD_TUNED_TORCH_HAS_CK_CONV
 #include "ck_conv_torch.hpp"
+#include "ck_conv_bwd_torch.hpp"
 #endif
 #ifdef AMD_TUNED_TORCH_HAS_CK_GEMM
 #include "ck_gemm_torch.hpp"
@@ -33,6 +34,15 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     // can fall back (see amd_tuned_torch/ck_ops.py).
     m.def("ck_conv", &ck_conv_forward,
           "Composable Kernel WMMA grouped-conv forward (fp16/bf16, 2D/3D, groups=1); "
+          "None if unsupported");
+    // Backward halves of the tier above -- conv2d only (see
+    // src/cuda/ck_conv_bwd.hpp), so training can eventually use this path
+    // too instead of always falling back once any input requires_grad.
+    m.def("ck_conv2d_backward_data", &ck_conv2d_backward_data,
+          "Composable Kernel WMMA grouped-conv2d backward data (fp16/bf16, groups=1); "
+          "None if unsupported");
+    m.def("ck_conv2d_backward_weight", &ck_conv2d_backward_weight,
+          "Composable Kernel WMMA grouped-conv2d backward weight (fp16/bf16, groups=1); "
           "None if unsupported");
 #endif
 #ifdef AMD_TUNED_TORCH_HAS_CK_NORM

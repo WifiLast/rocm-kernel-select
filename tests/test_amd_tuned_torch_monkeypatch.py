@@ -280,7 +280,7 @@ class TestEnableDisable:
 
 class TestPatchedLinear:
     def test_falls_back_when_ineligible(self, monkeypatch, aiter):
-        monkeypatch.setattr(amd_tuned_torch, "_usable", lambda *a, **k: False)
+        monkeypatch.setattr(amd_tuned_torch._dispatch, "_usable", lambda *a, **k: False)
         x = torch.randn(2, 4)
         w = torch.randn(3, 4)
         out = amd_tuned_torch._patched_linear(x, w, None)
@@ -728,7 +728,7 @@ class TestConv3dWinogradFp16Dispatch:
         amd_tuned_torch.disable_conv3d_winograd_fp16()
 
     def test_disabled_by_default(self):
-        assert not amd_tuned_torch._CONV3D_WINOGRAD_FP16_ENABLED
+        assert not amd_tuned_torch._opt_in_tiers._CONV3D_WINOGRAD_FP16_ENABLED
 
     def test_falls_back_when_ineligible_shape(self, monkeypatch, native):
         force_eligible(monkeypatch)
@@ -926,7 +926,7 @@ class TestFlashAttnRocwmmaDispatch:
         amd_tuned_torch.disable_flash_attn_rocwmma()
 
     def test_disabled_by_default(self):
-        assert not amd_tuned_torch._FLASH_ATTN_ROCWMMA_ENABLED
+        assert not amd_tuned_torch._opt_in_tiers._FLASH_ATTN_ROCWMMA_ENABLED
 
     def test_noop_with_warning_when_unavailable(self, monkeypatch):
         monkeypatch.setattr(amd_tuned_torch.flash_attn_rocwmma_ops, "available", lambda: False)
@@ -938,7 +938,7 @@ class TestFlashAttnRocwmmaDispatch:
         with pytest.warns(UserWarning):
             amd_tuned_torch.enable_flash_attn_rocwmma()
         assert F.scaled_dot_product_attention is prior
-        assert not amd_tuned_torch._FLASH_ATTN_ROCWMMA_ENABLED
+        assert not amd_tuned_torch._opt_in_tiers._FLASH_ATTN_ROCWMMA_ENABLED
 
     def test_falls_back_when_ineligible_shape(self, monkeypatch):
         force_eligible(monkeypatch)
@@ -1057,7 +1057,7 @@ class TestTritonKernelsRmsnormDispatch:
         amd_tuned_torch.disable_triton_kernels_rmsnorm()
 
     def test_disabled_by_default(self):
-        assert not amd_tuned_torch._TRITON_KERNELS_RMSNORM_ENABLED
+        assert not amd_tuned_torch._opt_in_tiers._TRITON_KERNELS_RMSNORM_ENABLED
 
     def test_noop_with_warning_when_unavailable(self, monkeypatch):
         monkeypatch.setattr(amd_tuned_torch.triton_kernels_ops, "available", lambda: False)
@@ -1065,7 +1065,7 @@ class TestTritonKernelsRmsnormDispatch:
         with pytest.warns(UserWarning):
             amd_tuned_torch.enable_triton_kernels_rmsnorm()
         assert F.rms_norm is prior
-        assert not amd_tuned_torch._TRITON_KERNELS_RMSNORM_ENABLED
+        assert not amd_tuned_torch._opt_in_tiers._TRITON_KERNELS_RMSNORM_ENABLED
 
     def test_falls_back_when_ineligible(self, monkeypatch):
         force_eligible(monkeypatch)
@@ -1119,7 +1119,7 @@ class TestTritonKernelsRmsnormDispatch:
         rms_norm does not decline for that reason, so it must fall through
         to _patched_rms_norm (the TE tier), not straight to stock. Cleanup
         undoes these LIFO, same lesson as TestConv3dWinogradFp16Dispatch."""
-        monkeypatch.setattr(amd_tuned_torch, "_usable", lambda *a, **k: True)
+        monkeypatch.setattr(amd_tuned_torch._dispatch, "_usable", lambda *a, **k: True)
         monkeypatch.setattr(amd_tuned_torch.triton_kernels_ops, "available", lambda: True)
         was_enabled = amd_tuned_torch.is_enabled()
         if not was_enabled:
@@ -1300,7 +1300,7 @@ class TestPatchedLayerNorm:
         te.layer_norm.assert_not_called()
 
     def test_calls_te_when_eligible(self, monkeypatch, te):
-        monkeypatch.setattr(amd_tuned_torch, "_usable", lambda *a, **k: True)
+        monkeypatch.setattr(amd_tuned_torch._dispatch, "_usable", lambda *a, **k: True)
         x = torch.randn(2, 4)
         w = torch.randn(4)
         b = torch.randn(4)
@@ -1310,7 +1310,7 @@ class TestPatchedLayerNorm:
         assert_called_once_with_tensors(te.layer_norm, x, [4], w, b, 1e-5)
 
     def test_falls_back_on_te_runtime_error(self, monkeypatch, te):
-        monkeypatch.setattr(amd_tuned_torch, "_usable", lambda *a, **k: True)
+        monkeypatch.setattr(amd_tuned_torch._dispatch, "_usable", lambda *a, **k: True)
         te.layer_norm.side_effect = RuntimeError("TE not built for this shape")
         x = torch.randn(2, 4)
         w = torch.randn(4)
@@ -1329,7 +1329,7 @@ class TestPatchedRmsNorm:
         te.rms_norm.assert_not_called()
 
     def test_calls_te_when_eligible(self, monkeypatch, te):
-        monkeypatch.setattr(amd_tuned_torch, "_usable", lambda *a, **k: True)
+        monkeypatch.setattr(amd_tuned_torch._dispatch, "_usable", lambda *a, **k: True)
         x = torch.randn(2, 4)
         w = torch.randn(4)
         te.rms_norm.return_value = torch.zeros(2, 4)
@@ -1342,14 +1342,14 @@ class TestPatchedGelu:
     def test_falls_back_for_exact_gelu(self, monkeypatch, te):
         # tex.gelu is the tanh approximation only; patching approximate=
         # "none" (the default) would silently change numerics.
-        monkeypatch.setattr(amd_tuned_torch, "_usable", lambda *a, **k: True)
+        monkeypatch.setattr(amd_tuned_torch._dispatch, "_usable", lambda *a, **k: True)
         x = torch.randn(4)
         out = amd_tuned_torch._patched_gelu(x, approximate="none")
         assert torch.equal(out, F.gelu(x, approximate="none"))
         te.gelu.assert_not_called()
 
     def test_calls_te_for_tanh_approximate(self, monkeypatch, te):
-        monkeypatch.setattr(amd_tuned_torch, "_usable", lambda *a, **k: True)
+        monkeypatch.setattr(amd_tuned_torch._dispatch, "_usable", lambda *a, **k: True)
         x = torch.randn(4)
         te.gelu.return_value = torch.zeros(4)
         out = amd_tuned_torch._patched_gelu(x, approximate="tanh")
@@ -1359,13 +1359,13 @@ class TestPatchedGelu:
 
 class TestPatchedSilu:
     def test_falls_back_for_inplace(self, monkeypatch, te):
-        monkeypatch.setattr(amd_tuned_torch, "_usable", lambda *a, **k: True)
+        monkeypatch.setattr(amd_tuned_torch._dispatch, "_usable", lambda *a, **k: True)
         x = torch.randn(4)
         amd_tuned_torch._patched_silu(x.clone(), inplace=True)
         te.silu.assert_not_called()
 
     def test_calls_te_when_eligible(self, monkeypatch, te):
-        monkeypatch.setattr(amd_tuned_torch, "_usable", lambda *a, **k: True)
+        monkeypatch.setattr(amd_tuned_torch._dispatch, "_usable", lambda *a, **k: True)
         x = torch.randn(4)
         te.silu.return_value = torch.zeros(4)
         out = amd_tuned_torch._patched_silu(x)
@@ -1428,20 +1428,20 @@ class TestIsBottomRightCausalMask:
 
 class TestPatchedSdpa:
     def test_falls_back_with_attn_mask(self, monkeypatch, te):
-        monkeypatch.setattr(amd_tuned_torch, "_usable", lambda *a, **k: True)
+        monkeypatch.setattr(amd_tuned_torch._dispatch, "_usable", lambda *a, **k: True)
         q = k = v = torch.randn(1, 2, 3, 4)
         mask = torch.zeros(3, 3, dtype=torch.bool)
         amd_tuned_torch._patched_sdpa(q, k, v, attn_mask=mask)
         te.scaled_dot_product_attention.assert_not_called()
 
     def test_falls_back_with_dropout(self, monkeypatch, te):
-        monkeypatch.setattr(amd_tuned_torch, "_usable", lambda *a, **k: True)
+        monkeypatch.setattr(amd_tuned_torch._dispatch, "_usable", lambda *a, **k: True)
         q = k = v = torch.randn(1, 2, 3, 4)
         amd_tuned_torch._patched_sdpa(q, k, v, dropout_p=0.1)
         te.scaled_dot_product_attention.assert_not_called()
 
     def test_calls_te_when_eligible(self, monkeypatch, te):
-        monkeypatch.setattr(amd_tuned_torch, "_usable", lambda *a, **k: True)
+        monkeypatch.setattr(amd_tuned_torch._dispatch, "_usable", lambda *a, **k: True)
         q = k = v = torch.randn(1, 2, 3, 4)
         te.scaled_dot_product_attention.return_value = torch.zeros(1, 2, 3, 4)
         out = amd_tuned_torch._patched_sdpa(q, k, v, is_causal=True)
@@ -1451,7 +1451,7 @@ class TestPatchedSdpa:
         )
 
     def test_falls_back_on_te_runtime_error(self, monkeypatch, te):
-        monkeypatch.setattr(amd_tuned_torch, "_usable", lambda *a, **k: True)
+        monkeypatch.setattr(amd_tuned_torch._dispatch, "_usable", lambda *a, **k: True)
         te.scaled_dot_product_attention.side_effect = RuntimeError("unsupported head_dim")
         q = k = v = torch.randn(1, 2, 3, 4)
         out = amd_tuned_torch._patched_sdpa(q, k, v)
@@ -1461,7 +1461,7 @@ class TestPatchedSdpa:
         # dflash / HF's sdpa_attention_forward build an explicit boolean
         # causal mask instead of setting is_causal=True -- this must still
         # reach TE, not silently fall back to stock forever.
-        monkeypatch.setattr(amd_tuned_torch, "_usable", lambda *a, **k: True)
+        monkeypatch.setattr(amd_tuned_torch._dispatch, "_usable", lambda *a, **k: True)
         q = k = v = torch.randn(1, 2, 3, 4)
         mask = torch.tril(torch.ones(3, 3, dtype=torch.bool))
         te.scaled_dot_product_attention.return_value = torch.zeros(1, 2, 3, 4)
@@ -1472,7 +1472,7 @@ class TestPatchedSdpa:
         )
 
     def test_falls_back_when_both_is_causal_and_attn_mask_set(self, monkeypatch, te):
-        monkeypatch.setattr(amd_tuned_torch, "_usable", lambda *a, **k: True)
+        monkeypatch.setattr(amd_tuned_torch._dispatch, "_usable", lambda *a, **k: True)
         q = k = v = torch.randn(1, 2, 3, 4)
         mask = torch.tril(torch.ones(3, 3, dtype=torch.bool))
         amd_tuned_torch._patched_sdpa(q, k, v, attn_mask=mask, is_causal=True)
@@ -1523,7 +1523,7 @@ class TestEnableDisableInt8Linear:
         amd_tuned_torch.enable_int8_linear()
         try:
             assert F.linear is amd_tuned_torch._patched_linear_int8
-            assert amd_tuned_torch._int8_linear_fallback is amd_tuned_torch._patched_linear
+            assert amd_tuned_torch._opt_in_tiers._int8_linear_fallback is amd_tuned_torch._patched_linear
         finally:
             amd_tuned_torch.disable_int8_linear()
             amd_tuned_torch.disable()
@@ -1531,18 +1531,18 @@ class TestEnableDisableInt8Linear:
     def test_is_idempotent(self, aiter):
         amd_tuned_torch.enable_int8_linear()
         try:
-            fallback = amd_tuned_torch._int8_linear_fallback
+            fallback = amd_tuned_torch._opt_in_tiers._int8_linear_fallback
             amd_tuned_torch.enable_int8_linear()
-            assert amd_tuned_torch._int8_linear_fallback is fallback
+            assert amd_tuned_torch._opt_in_tiers._int8_linear_fallback is fallback
         finally:
             amd_tuned_torch.disable_int8_linear()
 
 
 class TestPatchedLinearInt8:
     def test_falls_back_when_ineligible(self, monkeypatch, aiter):
-        monkeypatch.setattr(amd_tuned_torch, "_usable", lambda *a, **k: False)
+        monkeypatch.setattr(amd_tuned_torch._dispatch, "_usable", lambda *a, **k: False)
         fallback = MagicMock(return_value=torch.zeros(2, 3))
-        monkeypatch.setattr(amd_tuned_torch, "_int8_linear_fallback", fallback)
+        monkeypatch.setattr(amd_tuned_torch._opt_in_tiers, "_int8_linear_fallback", fallback)
         x = torch.randn(2, 4)
         w = torch.randn(3, 4)
         out = amd_tuned_torch._patched_linear_int8(x, w, None)
@@ -1551,7 +1551,7 @@ class TestPatchedLinearInt8:
         fallback.assert_called_once_with(x, w, None)
 
     def test_calls_aiter_when_eligible(self, monkeypatch, aiter):
-        monkeypatch.setattr(amd_tuned_torch, "_usable", lambda *a, **k: True)
+        monkeypatch.setattr(amd_tuned_torch._dispatch, "_usable", lambda *a, **k: True)
         x = torch.randn(2, 4)
         w = torch.randn(3, 4)
         aiter.linear_int8.return_value = torch.zeros(2, 3)
@@ -1560,10 +1560,10 @@ class TestPatchedLinearInt8:
         aiter.linear_int8.assert_called_once_with(x, w, None)
 
     def test_falls_back_on_aiter_runtime_error(self, monkeypatch, aiter):
-        monkeypatch.setattr(amd_tuned_torch, "_usable", lambda *a, **k: True)
+        monkeypatch.setattr(amd_tuned_torch._dispatch, "_usable", lambda *a, **k: True)
         aiter.linear_int8.side_effect = RuntimeError("aiter not built for this shape")
         fallback = MagicMock(return_value=torch.zeros(2, 3))
-        monkeypatch.setattr(amd_tuned_torch, "_int8_linear_fallback", fallback)
+        monkeypatch.setattr(amd_tuned_torch._opt_in_tiers, "_int8_linear_fallback", fallback)
         x = torch.randn(2, 4)
         w = torch.randn(3, 4)
         out = amd_tuned_torch._patched_linear_int8(x, w, None)
@@ -1728,7 +1728,7 @@ class TestFftconvConvTier:
 
     def test_env_gate_disables_the_tier(self, monkeypatch):
         force_eligible(monkeypatch)
-        monkeypatch.setattr(amd_tuned_torch, "_FFTCONV_CONV2D_ENABLED", False)
+        monkeypatch.setattr(amd_tuned_torch._dispatch, "_FFTCONV_CONV2D_ENABLED", False)
         k = amd_tuned_torch._FFTCONV_CONV2D_MIN_KERNEL
         assert amd_tuned_torch._fftconv_conv_candidate(
             torch.randn(1, 2, 8 + k, 8 + k), torch.randn(2, 2, k, k), None,
@@ -1751,7 +1751,7 @@ class TestFftconvConvTier:
         quantity flexgemm_ops._n_spatial_positions computes for its own
         sparse-conv gate."""
         force_eligible(monkeypatch)
-        monkeypatch.setattr(amd_tuned_torch, "_FFTCONV_CONV3D_MIN_POSITIONS", 100)
+        monkeypatch.setattr(amd_tuned_torch._dispatch, "_FFTCONV_CONV3D_MIN_POSITIONS", 100)
         k = amd_tuned_torch._FFTCONV_CONV3D_MIN_KERNEL
         # 4^3 = 64 per sample, batch 2 -> 128 >= 100.
         assert amd_tuned_torch._fftconv_conv_candidate(
@@ -1763,7 +1763,7 @@ class TestFftconvConvTier:
         small must still be considered (subject only to its own
         kernel-width gate)."""
         force_eligible(monkeypatch)
-        monkeypatch.setattr(amd_tuned_torch, "_FFTCONV_CONV3D_MIN_POSITIONS", 10**9)
+        monkeypatch.setattr(amd_tuned_torch._dispatch, "_FFTCONV_CONV3D_MIN_POSITIONS", 10**9)
         k = amd_tuned_torch._FFTCONV_CONV2D_MIN_KERNEL
         assert amd_tuned_torch._fftconv_conv_candidate(
             torch.randn(1, 2, k, k), torch.randn(2, 2, k, k), None,
@@ -1794,42 +1794,134 @@ class TestFftconvConv3dMinPositionsCalibrationPrecedence:
     already covers for its own sparse-conv gate, applied to
     tools/benchmark_fftconv3d_min_positions.py's calibration instead.
 
-    Reloads the whole amd_tuned_torch package (not just a leaf *_ops
-    module) since _FFTCONV_CONV3D_MIN_POSITIONS is defined directly in
-    __init__.py -- confirmed safe in this suite because conftest.py's fake
-    _native/_native_ck/_native_hipblaslt modules are already registered in
-    sys.modules before the first import, so a reload finds them again
-    rather than trying to build the real extensions.
+    Reloads amd_tuned_torch._dispatch specifically (not the whole
+    amd_tuned_torch package) since _FFTCONV_CONV3D_MIN_POSITIONS is defined
+    there (amd_tuned_torch/__init__.py just re-exports it via
+    `from ._dispatch import *` -- reloading __init__.py alone would not
+    re-run _dispatch.py's module body, since it's already in sys.modules by
+    then, so the value would never actually recompute) -- confirmed safe in
+    this suite because conftest.py's fake _native/_native_ck/
+    _native_hipblaslt modules are already registered in sys.modules before
+    the first import, so a reload finds them again rather than trying to
+    build the real extensions.
     """
 
     def teardown_method(self):
         os.environ.pop("AMD_TUNED_TORCH_FFTCONV3D_MIN_POSITIONS", None)
-        importlib.reload(amd_tuned_torch)
+        importlib.reload(amd_tuned_torch._dispatch)
 
     def test_uses_hardcoded_default_when_no_calibration(self, monkeypatch):
         monkeypatch.delenv("AMD_TUNED_TORCH_FFTCONV3D_MIN_POSITIONS", raising=False)
         monkeypatch.setattr(amd_tuned_torch.fftconv_calibration, "load", lambda: {})
-        importlib.reload(amd_tuned_torch)
-        assert amd_tuned_torch._FFTCONV_CONV3D_MIN_POSITIONS == 2048
+        importlib.reload(amd_tuned_torch._dispatch)
+        assert amd_tuned_torch._dispatch._FFTCONV_CONV3D_MIN_POSITIONS == 2048
 
     def test_uses_calibrated_value_when_present(self, monkeypatch):
         monkeypatch.delenv("AMD_TUNED_TORCH_FFTCONV3D_MIN_POSITIONS", raising=False)
         monkeypatch.setattr(amd_tuned_torch.fftconv_calibration, "load",
                              lambda: {"conv3d": {"min_positions": 777}})
-        importlib.reload(amd_tuned_torch)
-        assert amd_tuned_torch._FFTCONV_CONV3D_MIN_POSITIONS == 777
+        importlib.reload(amd_tuned_torch._dispatch)
+        assert amd_tuned_torch._dispatch._FFTCONV_CONV3D_MIN_POSITIONS == 777
 
     def test_calibration_for_other_dim_or_field_does_not_affect_this_one(self, monkeypatch):
         monkeypatch.delenv("AMD_TUNED_TORCH_FFTCONV3D_MIN_POSITIONS", raising=False)
         monkeypatch.setattr(amd_tuned_torch.fftconv_calibration, "load",
                              lambda: {"conv2d": {"min_positions": 111},
                                       "conv3d": {"min_kernel": 9}})
-        importlib.reload(amd_tuned_torch)
-        assert amd_tuned_torch._FFTCONV_CONV3D_MIN_POSITIONS == 2048
+        importlib.reload(amd_tuned_torch._dispatch)
+        assert amd_tuned_torch._dispatch._FFTCONV_CONV3D_MIN_POSITIONS == 2048
 
     def test_explicit_env_var_wins_over_calibration(self, monkeypatch):
         monkeypatch.setenv("AMD_TUNED_TORCH_FFTCONV3D_MIN_POSITIONS", "999")
         monkeypatch.setattr(amd_tuned_torch.fftconv_calibration, "load",
                              lambda: {"conv3d": {"min_positions": 777}})
-        importlib.reload(amd_tuned_torch)
-        assert amd_tuned_torch._FFTCONV_CONV3D_MIN_POSITIONS == 999
+        importlib.reload(amd_tuned_torch._dispatch)
+        assert amd_tuned_torch._dispatch._FFTCONV_CONV3D_MIN_POSITIONS == 999
+
+
+def _fake_peft_boft(monkeypatch, fbd_cuda=None, get_fbd=None):
+    """Minimal peft.tuners.boft.layer in sys.modules so enable_boft()'s
+    `from peft.tuners.boft import layer` resolves without peft installed --
+    same approach as tests/test_boft_ops.py's own fake module."""
+    fake_layer = types.ModuleType("peft.tuners.boft.layer")
+    fake_layer._FBD_CUDA = fbd_cuda
+    fake_layer.get_fbd_cuda = get_fbd if get_fbd is not None else (lambda: fbd_cuda)
+    fake_boft = types.ModuleType("peft.tuners.boft")
+    fake_boft.layer = fake_layer
+    fake_tuners = types.ModuleType("peft.tuners")
+    fake_tuners.boft = fake_boft
+    fake_peft = types.ModuleType("peft")
+    fake_peft.tuners = fake_tuners
+    for name, mod in [("peft", fake_peft), ("peft.tuners", fake_tuners),
+                      ("peft.tuners.boft", fake_boft),
+                      ("peft.tuners.boft.layer", fake_layer)]:
+        monkeypatch.setitem(sys.modules, name, mod)
+    return fake_layer
+
+
+class TestBoftTier:
+    """enable_boft/disable_boft -- off by default (it would import peft, and
+    transformers behind it), and unlike every other tier here it patches a
+    third-party package rather than torch.nn.functional. See
+    amd_tuned_torch/boft_ops.py for the kernel itself."""
+
+    def teardown_method(self):
+        amd_tuned_torch.disable_boft()
+
+    def test_disabled_by_default(self):
+        assert not amd_tuned_torch._opt_in_tiers._BOFT_ENABLED
+        assert amd_tuned_torch.is_boft_enabled() is False
+
+    def test_noop_with_warning_when_peft_missing(self, monkeypatch):
+        monkeypatch.setitem(sys.modules, "peft", None)
+        with pytest.warns(UserWarning, match="peft not installed"):
+            amd_tuned_torch.enable_boft()
+        assert not amd_tuned_torch._opt_in_tiers._BOFT_ENABLED
+
+    def test_enable_points_peft_at_this_packages_kernel(self, monkeypatch, native):
+        fake_layer = _fake_peft_boft(monkeypatch)
+        amd_tuned_torch.enable_boft()
+
+        assert amd_tuned_torch.is_boft_enabled() is True
+        shim = fake_layer.get_fbd_cuda()
+        assert shim is fake_layer._FBD_CUDA
+        x = torch.randn(1, 2, 4, 4)
+        expected = torch.randn(1, 8, 8)
+        native.fast_block_diag_forward.return_value = expected
+        assert shim.forward(x) == [expected]
+        native.fast_block_diag_forward.assert_called_once_with(x)
+
+    def test_disable_restores_exactly_what_was_there(self, monkeypatch, native):
+        sentinel = object()
+        original_get = lambda: sentinel  # noqa: E731
+        fake_layer = _fake_peft_boft(monkeypatch, fbd_cuda=sentinel, get_fbd=original_get)
+
+        amd_tuned_torch.enable_boft()
+        assert fake_layer.get_fbd_cuda() is not sentinel
+
+        amd_tuned_torch.disable_boft()
+        # Not merely "None again" -- a BOFTLayer earlier in the process may
+        # have already resolved upstream's own JIT build into _FBD_CUDA, and
+        # that must survive a disable.
+        assert fake_layer._FBD_CUDA is sentinel
+        assert fake_layer.get_fbd_cuda is original_get
+        assert not amd_tuned_torch._opt_in_tiers._BOFT_ENABLED
+
+    def test_enable_is_idempotent(self, monkeypatch, native):
+        fake_layer = _fake_peft_boft(monkeypatch)
+        amd_tuned_torch.enable_boft()
+        first = fake_layer.get_fbd_cuda()
+        amd_tuned_torch.enable_boft()
+        assert fake_layer.get_fbd_cuda() is first
+
+    def test_disable_without_enable_is_a_noop(self, monkeypatch):
+        _fake_peft_boft(monkeypatch)
+        amd_tuned_torch.disable_boft()  # must not raise
+        assert not amd_tuned_torch._opt_in_tiers._BOFT_ENABLED
+
+    def test_fast_block_diag_reexported_at_package_level(self, native):
+        x = torch.randn(2, 3, 4, 4)
+        expected = torch.randn(2, 12, 12)
+        native.fast_block_diag_forward.return_value = expected
+        assert amd_tuned_torch.fast_block_diag(x) is expected
+        native.fast_block_diag_forward.assert_called_once_with(x)

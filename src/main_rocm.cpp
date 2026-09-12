@@ -68,6 +68,27 @@ void launch_group_norm_fp32(float* output, const float* input, const float* gamm
                              const float* beta, int N, int C, int HxW, int groups, float eps,
                              hipStream_t stream);
 
+// src/cuda/fast_block_diag.cu -- see custom_fast_block_diag_forward/backward
+// below and amd_tuned_torch/boft_ops.py for what this is (BOFT's
+// block-diagonal assembly/disassembly, ported from source/peft's own
+// optional CUDA extension).
+void launch_fast_block_diag_fwd_fp16(const void* input, void* output, int z, int N, int b,
+                                      hipStream_t stream);
+void launch_fast_block_diag_fwd_bf16(const void* input, void* output, int z, int N, int b,
+                                      hipStream_t stream);
+void launch_fast_block_diag_fwd_fp32(const void* input, void* output, int z, int N, int b,
+                                      hipStream_t stream);
+void launch_fast_block_diag_fwd_fp64(const void* input, void* output, int z, int N, int b,
+                                      hipStream_t stream);
+void launch_fast_block_diag_bwd_fp16(const void* grad_output, void* grad_input, int z, int N,
+                                      int b, hipStream_t stream);
+void launch_fast_block_diag_bwd_bf16(const void* grad_output, void* grad_input, int z, int N,
+                                      int b, hipStream_t stream);
+void launch_fast_block_diag_bwd_fp32(const void* grad_output, void* grad_input, int z, int N,
+                                      int b, hipStream_t stream);
+void launch_fast_block_diag_bwd_fp64(const void* grad_output, void* grad_input, int z, int N,
+                                      int b, hipStream_t stream);
+
 // src/cuda/generated/conv2d_fp16_*.cu -- one launcher per tile-shape
 // variant in tools/kernelgen/variants.py; run_conv2d_fp16 below (in the
 // anonymous namespace) picks which one to call per input shape, via a
@@ -578,6 +599,69 @@ torch::Tensor custom_group_norm_forward(torch::Tensor input, int64_t num_groups,
 }
 
 // ------------------------------------------------------------------
+// BOFT fast_block_diag (src/cuda/fast_block_diag.cu) -- see
+// amd_tuned_torch/boft_ops.py's module docstring for what this is and why
+// it lives here rather than in BOFT's own runtime-JIT extension.
+// ------------------------------------------------------------------
+
+torch::Tensor custom_fast_block_diag_forward(torch::Tensor input) {
+    TORCH_CHECK(input.dim() == 4, "fast_block_diag expects a 4D [z, N, b, b] input");
+    TORCH_CHECK(input.size(2) == input.size(3), "fast_block_diag's last two dims must be equal");
+    input = input.contiguous();
+    int64_t z = input.size(0), N = input.size(1), b = input.size(2);
+
+    auto output = torch::zeros({z, N * b, N * b}, input.options());
+    hipStream_t stream = current_stream();
+
+    if (input.dtype() == torch::kFloat16) {
+        launch_fast_block_diag_fwd_fp16(input.data_ptr(), output.data_ptr(), (int)z, (int)N,
+                                         (int)b, stream);
+    } else if (input.dtype() == torch::kBFloat16) {
+        launch_fast_block_diag_fwd_bf16(input.data_ptr(), output.data_ptr(), (int)z, (int)N,
+                                         (int)b, stream);
+    } else if (input.dtype() == torch::kFloat32) {
+        launch_fast_block_diag_fwd_fp32(input.data_ptr(), output.data_ptr(), (int)z, (int)N,
+                                         (int)b, stream);
+    } else if (input.dtype() == torch::kFloat64) {
+        launch_fast_block_diag_fwd_fp64(input.data_ptr(), output.data_ptr(), (int)z, (int)N,
+                                         (int)b, stream);
+    } else {
+        TORCH_CHECK(false, "Unsupported dtype for fast_block_diag (fp16/bf16/fp32/fp64 only)");
+    }
+
+    return output;
+}
+
+torch::Tensor custom_fast_block_diag_backward(torch::Tensor grad_output, torch::Tensor input) {
+    TORCH_CHECK(input.dim() == 4, "fast_block_diag expects a 4D [z, N, b, b] input");
+    TORCH_CHECK(input.size(2) == input.size(3), "fast_block_diag's last two dims must be equal");
+    TORCH_CHECK(grad_output.dtype() == input.dtype(), "grad_output/input dtype mismatch");
+    grad_output = grad_output.contiguous();
+    int64_t z = input.size(0), N = input.size(1), b = input.size(2);
+
+    auto grad_input = torch::zeros_like(input);
+    hipStream_t stream = current_stream();
+
+    if (input.dtype() == torch::kFloat16) {
+        launch_fast_block_diag_bwd_fp16(grad_output.data_ptr(), grad_input.data_ptr(), (int)z,
+                                         (int)N, (int)b, stream);
+    } else if (input.dtype() == torch::kBFloat16) {
+        launch_fast_block_diag_bwd_bf16(grad_output.data_ptr(), grad_input.data_ptr(), (int)z,
+                                         (int)N, (int)b, stream);
+    } else if (input.dtype() == torch::kFloat32) {
+        launch_fast_block_diag_bwd_fp32(grad_output.data_ptr(), grad_input.data_ptr(), (int)z,
+                                         (int)N, (int)b, stream);
+    } else if (input.dtype() == torch::kFloat64) {
+        launch_fast_block_diag_bwd_fp64(grad_output.data_ptr(), grad_input.data_ptr(), (int)z,
+                                         (int)N, (int)b, stream);
+    } else {
+        TORCH_CHECK(false, "Unsupported dtype for fast_block_diag (fp16/bf16/fp32/fp64 only)");
+    }
+
+    return grad_input;
+}
+
+// ------------------------------------------------------------------
 // Conv2d (groups=1 only -- see amd_tuned_torch/__init__.py's
 // _patched_conv2d for the groups!=1 fallback, same convention as aiter's)
 // ------------------------------------------------------------------
@@ -928,6 +1012,10 @@ torch::Tensor dot4_i8_gemm(torch::Tensor a, torch::Tensor b) {
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.def("group_norm", &custom_group_norm_forward, "Hand-written HIP GroupNorm");
+    m.def("fast_block_diag_forward", &custom_fast_block_diag_forward,
+          "BOFT fast_block_diag forward (fp16/bf16/fp32/fp64): [z,N,b,b] -> block_diag [z,Nb,Nb]");
+    m.def("fast_block_diag_backward", &custom_fast_block_diag_backward,
+          "BOFT fast_block_diag backward: grad [z,Nb,Nb] -> grad [z,N,b,b]");
     m.def("conv2d", &custom_conv2d_forward, "Hand-written HIP Conv2d (fp16/fp32, groups=1)");
     m.def("conv3d", &custom_conv3d_forward, "Hand-written HIP Conv3d (fp16/fp32, groups=1)");
     // CK (has_ck/ck_conv/ck_group_norm/ck_gemm_linear) and hipBLASLt

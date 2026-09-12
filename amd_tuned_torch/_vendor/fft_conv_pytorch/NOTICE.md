@@ -78,16 +78,23 @@ What changed from upstream, and why:
     definition). A caller wanting an `nn.Conv1d`-shaped layer already gets
     this transparently once `amd_tuned_torch.miopen_fallback`'s F.conv1d
     patch routes an eligible large-kernel call here.
-  - `complex_matmul` now does the actual multiply as a single native
-    complex `@` (`a @ b` on the complex64 tensors directly) instead of
-    upstream's manual 4-real-matmul expansion
-    (`a.real@b.real - a.imag@b.imag`, `a.imag@b.real + a.real@b.imag`,
-    reassembled into a freshly allocated complex tensor). `a`/`b` are
-    already complex64 here (sliced straight out of `rfftn`'s output), and
-    PyTorch's `matmul` supports complex dtypes directly, dispatching to one
-    native complex GEMM (rocBLAS/hipBLAS `cgemm` on ROCm, same backend
-    every other complex-valued call in this stack already goes through)
-    instead of 4 separate real GEMM launches plus the recombination
-    allocation upstream pays for an identical result. Numerically
-    identical -- see complex_matmul's own docstring.
+  - `complex_matmul` writes the frequency-domain contraction as a
+    `torch.einsum` over contiguous operands (plus a plain elementwise
+    multiply for the depthwise case), instead of upstream's `movedim`-
+    reshaped `@` with a degenerate 1-wide dimension -- and instead of
+    upstream's manual 4-real-matmul expansion (`a.real@b.real -
+    a.imag@b.imag`, `a.imag@b.real + a.real@b.imag`, reassembled into a
+    freshly allocated complex tensor), which this file replaced with a
+    single native complex `@` first. Both of those earlier forms ask the
+    BLAS backend for a batched GEMM per frequency bin over non-contiguous
+    views; measured on gfx1100 the einsum is 6-8x faster for grouped/dense
+    convs and 80x for depthwise (where the "matmul" is a scalar product
+    dispatched as a 1x1 GEMM), bit-identical output. It also fixes a crash
+    inherited from upstream: the final `view` over a `movedim`-produced
+    non-contiguous tensor raised `RuntimeError: view size is not
+    compatible with input tensor's size and stride` for any conv with
+    `groups > 1` and `Cout/groups > 1`. See `complex_matmul`'s own
+    docstring for the numbers and
+    `tests/test_fftconv_ops.py::TestComplexMatmul`, which pins the new
+    form against the old contraction.
   - `to_ntuple` is otherwise unchanged from upstream.

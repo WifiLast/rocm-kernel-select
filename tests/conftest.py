@@ -42,7 +42,8 @@ if str(PACKAGE_ROOT) not in sys.path:
 # amd_tuned_torch.iu4_gemm_ops (EXPERIMENTAL, opt-in only -- see that
 # module's docstring); mocked the same way for the same reason.
 NATIVE_OPS = ["group_norm", "conv2d", "conv3d", "conv3d_fp16_winograd_bt8_bc8",
-              "iu4_gemm_supported", "iu4_gemm", "iu8_gemm", "dot4_i8_gemm"]
+              "iu4_gemm_supported", "iu4_gemm", "iu8_gemm", "dot4_i8_gemm",
+              "fast_block_diag_forward", "fast_block_diag_backward"]
 
 # Every function exported by amd_tuned_torch/te_ops.py (besides `available`).
 TE_OPS = ["layer_norm", "rms_norm", "gelu", "silu", "scaled_dot_product_attention"]
@@ -161,6 +162,16 @@ def force_eligible(monkeypatch):
     dispatch logic (shape/argument-specific fallbacks, native/TE-call
     wiring, error fallback) be exercised with plain CPU tensors on any
     machine.
+
+    Patches amd_tuned_torch._dispatch (not amd_tuned_torch itself):
+    _grad_safe/_usable are DEFINED in _dispatch.py, and every wrapper that
+    calls them -- including the opt-in tiers in _opt_in_tiers.py, via its
+    own `from . import _dispatch; _dispatch._grad_safe(...)` -- resolves
+    them from THAT module's globals at call time, not from whatever
+    amd_tuned_torch.__init__'s `from ._dispatch import *` copied into the
+    top-level package namespace once at import time. Patching the
+    top-level copy would silently not affect any dispatch function's
+    actual behavior.
     """
-    monkeypatch.setattr(amd_tuned_torch, "_usable", lambda *a, **k: True)
-    monkeypatch.setattr(amd_tuned_torch, "_grad_safe", lambda *a, **k: True)
+    monkeypatch.setattr(amd_tuned_torch._dispatch, "_usable", lambda *a, **k: True)
+    monkeypatch.setattr(amd_tuned_torch._dispatch, "_grad_safe", lambda *a, **k: True)

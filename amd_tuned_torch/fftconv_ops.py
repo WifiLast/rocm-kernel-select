@@ -72,6 +72,14 @@ for the full fast-path ordering; unlike the sparse fast path,
 `rfftn`/`irfftn`/`pad`/`kron`/`@`, no custom kernel, no `.detach()`
 anywhere) means this needs no `_grad_safe` check -- it stays correct,
 gradient and all, whether or not the call is under `torch.no_grad()`.
+That property is now load-bearing in a second place: this module's
+`rfftn`/`irfftn` are shims that can serve a transform straight from
+librocfft via `rocfft_ops` (see the ROCFFT ROUTING comment above
+`_rocfft_usable`), and those raw ctypes calls produce no grad_fn, so the
+shims hand back to torch.fft whenever a gradient could be involved. The
+autograd path through `fft_conv` is therefore unchanged and still entirely
+torch.fft's -- verified bit-identical gradients with the routing on and
+off.
 
 ALL THREE DIMENSIONALITIES ARE NOW AUTO-PATCHED, not just conv1d (this
 paragraph used to say otherwise -- conv2d/conv3d's wiring was added later,
@@ -114,7 +122,9 @@ from typing import Iterable, Optional, Tuple, Union
 import torch
 import torch.nn.functional as F
 from torch import Tensor
-from torch.fft import irfftn, rfftn
+from torch.fft import irfftn as _torch_irfftn, rfftn as _torch_rfftn
+
+from . import kernel_select, rocfft_ops
 
 
 def available() -> bool:
@@ -128,6 +138,154 @@ def _env_flag(name: str, default: str = "1") -> bool:
     from there to avoid a cross-module dependency for one four-line
     helper."""
     return os.environ.get(name, default).strip().lower() not in ("0", "", "false", "no", "off")
+
+
+# ---------------------------------------------------------------------------
+# rocFFT routing for this module's two transforms.
+#
+# `rocfft_ops` calls the SAME librocfft.so that torch.fft already reaches
+# through hipFFT, so this is not a different FFT -- measured bit-identical
+# output (max relative error exactly 0.0) on gfx1100 / rocFFT 1.0.36 for 1D,
+# 2D and 3D. What differs is how much work happens around the transform,
+# and WHICH SIDE THAT FAVOURS DEPENDS ENTIRELY ON THE SHAPE. Measured on a
+# Radeon RX 7900 XTX, fp32, median of repeated interleaved runs, as
+# torch.fft time / rocfft_ops time (>1 means rocFFT wins) --
+#
+#     rfftn (2, 8, 65536)        dim=-1        0.28x   <- rocFFT 3.6x SLOWER
+#     rfftn (16, 8, 65536)       dim=-1        0.72x   <- rocFFT slower
+#     rfftn (4096, 8192)         dim=-1        1.23x
+#     rfftn (32, 1024, 1024)     dim=(-2,-1)   1.06x
+#     rfftn (2, 4, 96, 96, 96)   3D            1.21x
+#     rfftn (1, 2, 160,160,160)  3D            9.34x   <- rocFFT much faster
+#
+# There is no clean rule here ("3D always wins" is FALSE -- 96^3 is 1.21x
+# and 64^3 is 1.30x, while a large-batch 1D transform is a 3.6x regression),
+# and routing everything to rocFFT unconditionally measurably slows
+# `fft_conv1d` down. So the choice is made the way every other
+# implementation choice in this package is made: per shape, by measuring
+# once and caching the winner, via `kernel_select`. This is exactly the
+# "actually measure a real win on real hardware first" precondition
+# `rocfft_ops`' own docstring attaches to being wired in here.
+#
+# AUTOGRAD IS THE REASON THIS IS GUARDED RATHER THAN A PLAIN IMPORT SWAP.
+# `fft_conv` below is differentiable by construction and this module's
+# docstring depends on that ("no custom kernel, no `.detach()` anywhere ...
+# it stays correct, gradient and all, whether or not the call is under
+# `torch.no_grad()`"). `rocfft_ops.rfftn`/`irfftn` are raw ctypes calls into
+# librocfft with no `torch.autograd.Function` wrapper, so a tensor produced
+# by them carries no grad_fn: routing them in unconditionally would not
+# error, it would silently return a graph-detached result and break backward
+# through every FFT convolution. So the shims below hand back to torch.fft
+# the moment a gradient could be involved. Everything else they check is a
+# hard precondition of rocfft_ops' own API (CUDA-resident, float32/float64,
+# trailing transform dims only) rather than a judgement call.
+# ---------------------------------------------------------------------------
+_ROCFFT_ENABLED = _env_flag("AMD_TUNED_TORCH_FFTCONV_ROCFFT", default="1")
+
+
+def rocfft_enabled() -> bool:
+    """True unless AMD_TUNED_TORCH_FFTCONV_ROCFFT=0. Read once at import
+    time, same convention as `_FFTCONV1D_ENABLED` below."""
+    return _ROCFFT_ENABLED
+
+
+def _rocfft_usable(x: Tensor, dim: Tuple[int, ...], *, grad_operands=()) -> bool:
+    """True if `rocfft_ops` can serve this exact transform with identical
+    results AND without dropping a gradient on the floor."""
+    if not (_ROCFFT_ENABLED and rocfft_ops.available()):
+        return False
+    if not x.is_cuda:
+        return False
+    # Any chance of a backward pass -> torch.fft, see the block comment.
+    if torch.is_grad_enabled() and any(
+        t is not None and t.requires_grad for t in (x,) + tuple(grad_operands)
+    ):
+        return False
+    if x.requires_grad:
+        return False
+    # rocfft_ops transforms the trailing dims only.
+    ndim = x.dim()
+    return tuple(d % ndim for d in dim) == tuple(range(ndim - len(dim), ndim))
+
+
+def _contest(kind: str, key, rocfft_thunk, torch_thunk):
+    """Run `rocfft_thunk` vs `torch_thunk` through kernel_select's
+    measure-once-cache-the-winner contest, falling back to torch.fft when
+    the contest is disabled (AMD_TUNED_TORCH_MEASURE_KERNELS=0) or declines.
+
+    torch.fft is the SECOND candidate deliberately: kernel_select verifies
+    each candidate numerically against the first one, and torch.fft is the
+    behaviour this module is required to preserve, so it must be the thing
+    compared *to*, not the reference. Both call the same librocfft, and
+    measured output is bit-identical, so this verification should never
+    actually fire -- if it ever does, rocfft_ops is wrong for that shape and
+    kernel_select excluding it permanently is the right outcome."""
+    if not kernel_select.enabled():
+        return torch_thunk()
+    won = kernel_select.cached_key(kind, key)
+    if won == "torch":
+        return torch_thunk()
+    if won == "rocfft":
+        out = rocfft_thunk()
+        if out is not None:
+            return out
+    elif won is None:
+        out = kernel_select.pick_key(kind, key, [
+            ("rocfft", rocfft_thunk),
+            ("torch", torch_thunk),
+        ])
+        if out is not None:
+            return out
+    return torch_thunk()
+
+
+def rfftn(x: Tensor, dim: Tuple[int, ...]) -> Tensor:
+    """`torch.fft.rfftn`, served by whichever of rocFFT-direct and torch.fft
+    measures faster for this exact shape (see the block comment above).
+    Signature is deliberately the narrow one this module actually calls, not
+    torch.fft.rfftn's full one."""
+    def _torch():
+        return _torch_rfftn(x, dim=dim)
+
+    if not (x.dtype in (torch.float32, torch.float64) and _rocfft_usable(x, dim)):
+        return _torch()
+
+    def _rocfft():
+        try:
+            return rocfft_ops.rfftn(x, dim=dim)
+        except (rocfft_ops.RocfftError, TypeError, ValueError):
+            return None
+
+    return _contest("fftconv_rfftn", (x.dtype, tuple(x.shape), tuple(dim)), _rocfft, _torch)
+
+
+def irfftn(x: Tensor, dim: Tuple[int, ...], s: Optional[Tuple[int, ...]] = None) -> Tensor:
+    """`torch.fft.irfftn`, served by `rocfft_ops` when safe/applicable.
+
+    torch.fft.irfftn infers the real output's last transform dimension as
+    `2 * (n - 1)` when `s` is omitted; `rocfft_ops.irfftn` requires the real
+    lengths explicitly (its plan needs them). Reproducing torch's inference
+    here rather than passing the caller's own intended size keeps this a
+    drop-in replacement -- for an odd-length signal those two differ, and
+    silently "fixing" that would change this module's output."""
+    if s is None:
+        ndim = x.dim()
+        dims = tuple(d % ndim for d in dim)
+        s = tuple(x.shape[d] for d in dims[:-1]) + (2 * (x.shape[dims[-1]] - 1),)
+    def _torch():
+        return _torch_irfftn(x, s=s, dim=dim)
+
+    if not (x.dtype in (torch.complex64, torch.complex128) and _rocfft_usable(x, dim)):
+        return _torch()
+
+    def _rocfft():
+        try:
+            return rocfft_ops.irfftn(x, s=s, dim=dim)
+        except (rocfft_ops.RocfftError, TypeError, ValueError):
+            return None
+
+    return _contest("fftconv_irfftn", (x.dtype, tuple(x.shape), tuple(dim), tuple(s)),
+                    _rocfft, _torch)
 
 
 def to_ntuple(val: Union[int, Iterable[int]], n: int) -> Tuple[int, ...]:
@@ -148,34 +306,69 @@ def to_ntuple(val: Union[int, Iterable[int]], n: int) -> Tuple[int, ...]:
 
 
 def complex_matmul(a: Tensor, b: Tensor, groups: int = 1) -> Tensor:
-    """Grouped complex-valued matrix multiplication.
+    """Grouped complex-valued frequency-domain multiply: for every frequency
+    bin, `out[n, o] = sum_i a[n, i] * b[o, i]` summed over the input channels
+    belonging to output channel `o`'s group. `a` is [N, Cin, *freq] out of
+    rfftn, `b` is [Cout, Cin/groups, *freq]; the result is [N, Cout, *freq].
 
-    DIFFERS FROM UPSTREAM (see _vendor/fft_conv_pytorch/NOTICE.md): fft-conv-
-    pytorch's original manually expands this into 4 separate real matmuls
-    (a.real@b.real, a.imag@b.imag, a.real@b.imag, a.imag@b.real) plus a
-    fresh torch.zeros(..., dtype=complex64) allocation to reassemble the
-    real/imag halves into a complex tensor. `a`/`b` are already complex64
-    here (sliced straight out of rfftn's output) -- `@`/torch.matmul
-    supports complex dtypes directly and dispatches to a single native
-    complex GEMM (cgemm, same call vendor BLAS uses for a real complex-valued
-    workload -- rocBLAS/hipBLAS on ROCm, cuBLAS on CUDA, MKL/OpenBLAS on
-    CPU), so doing the split by hand here was strictly more work for an
-    identical result: 4 kernel launches instead of 1, plus the intermediate
-    real/imag tensors and the extra allocation to recombine them -- none of
-    which the complex GEMM path needs. Numerically identical (both compute
-    the same complex product; which multiply/add count the BLAS backend
-    uses internally is its own implementation detail, not something this
-    call site controls either way)."""
-    a = a.view(a.size(0), groups, -1, *a.shape[2:])
-    b = b.view(groups, -1, *b.shape[1:])
+    WRITTEN AS AN EINSUM, NOT A RESHAPED `@`. Upstream (and this function
+    until the layout was profiled) expresses the contraction by moving the
+    channel axis to the end with `movedim`, adding a length-1 axis, and
+    calling `@` -- which asks the BLAS backend for a batched GEMM over every
+    frequency bin whose operands are non-contiguous views with a degenerate
+    1-wide dimension. That is a pathological request: measured on gfx1100
+    (complex64, the shapes fft_conv actually produces), it cost 27.7 ms for
+    a dense 1D conv's [8,128] x [128,128] over 4609 bins and 21.0 ms for a
+    2D conv's [8,64] x [64,64] over 12960 bins, where the same contraction
+    written as an einsum over contiguous operands takes 3.5 ms and 2.7 ms
+    -- 6-8x, for bit-identical output (same contraction order; verified
+    exactly equal, not merely close). End to end that is fft_conv 25.8 ms
+    -> 9.6 ms on the 2D shape and 52.3 ms -> 28.7 ms on the dense 1D one.
+    The win is layout, not arithmetic: there are no fewer complex
+    multiplies here than before.
 
-    a = torch.movedim(a, 2, a.dim() - 1).unsqueeze(-2)
-    b = torch.movedim(b, (1, 2), (b.dim() - 1, b.dim() - 2))
+    DEPTHWISE IS NOT A MATMUL AT ALL. When `groups == Cin` (Cin/groups == 1,
+    Cout == groups -- the long depthwise conv1d that is this module's
+    headline Hyena-style workload) the per-bin contraction is over a single
+    input channel, i.e. a scalar complex product, and dispatching it as a
+    batched GEMM over N*C*bins 1x1 matrices is the worst case of the
+    paragraph above: 62.7 ms where the plain elementwise multiply below
+    takes 0.78 ms (80x), taking fft_conv itself from 70.9 ms to 20.4 ms on
+    B=8, C=256, L=16384, K=2048. Whether that is enough to beat whatever
+    conv1d tier this shape would otherwise land on is still kernel_select's
+    measurement to make, not this docstring's claim -- against unpatched
+    F.conv1d the same shape is roughly a tie, and the point here is that
+    the tier is no longer losing 3.5x of its own time to a layout mistake
+    before that contest even starts.
 
-    c = a @ b
-    c = torch.movedim(c, c.dim() - 1, 2).squeeze(-1)
+    Both branches are ordinary differentiable primitives (`einsum`, `*`),
+    so fft_conv's "real autograd, no custom kernel anywhere" property (see
+    the module docstring) is unchanged.
 
-    return c.view(c.size(0), -1, *c.shape[3:])
+    FIXES A GROUPED-CONV CRASH. The old `@` formulation ended with
+    `c.view(...)` over a tensor `movedim` had just made non-contiguous,
+    which raised `RuntimeError: view size is not compatible with input
+    tensor's size and stride` for every grouped conv with `groups > 1` and
+    `Cout/groups > 1` (depthwise survived only because its trailing axis is
+    1 wide). That reached the public `fft_conv1d`/`2d`/`3d` and the
+    auto-patch candidates, neither of which filters `groups` -- see
+    tests/test_fftconv_ops.py::TestGroupedConv."""
+    n, cin = a.shape[0], a.shape[1]
+    cout, freq = b.shape[0], a.shape[2:]
+    a = a.reshape(n, cin, -1)
+    b = b.reshape(cout, b.shape[1], -1)
+
+    if b.shape[1] == 1 and cout == groups:
+        # Depthwise: one input channel per output channel, no sum to do.
+        out = a * b.squeeze(1).unsqueeze(0)
+    else:
+        out = torch.einsum(
+            "ngif,goif->ngof",
+            a.view(n, groups, cin // groups, -1),
+            b.view(groups, cout // groups, b.shape[1], -1),
+        ).reshape(n, cout, -1)
+
+    return out.reshape(n, cout, *freq)
 
 
 def fft_conv(

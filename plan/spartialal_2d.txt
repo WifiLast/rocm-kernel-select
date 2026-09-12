@@ -1,0 +1,937 @@
+# Keyframe-Difference 2D Convolution for Image Sets
+
+## 1. Goal
+
+Develop a 2D convolution approach for **sets of related images** where:
+
+* one dimension represents a spatial axis (`W` or `H`)
+* the second dimension represents the **image index** `n` of the set
+* the relationship between images is represented primarily through
+  **differences against a keyframe**
+* the first/key image provides the base information
+* all other images update that base representation using residuals
+
+The objective is to reduce computation compared with processing every image
+of the set independently with a full per-image Conv2D stack, and compared with
+treating the stack as a volume and running Conv3D over it.
+
+### Which image sets
+
+The approach only makes sense when the images of a set are *correlated*.
+Candidate domains, ordered by expected residual sparsity:
+
+```text
+burst photography        (same scene, ms apart)      ← highest correlation
+exposure brackets        (same scene, different EV)
+multi-view / stereo      (same scene, small baseline)
+medical slice stacks     (CT/MRI, adjacent slices)
+augmentation sets        (same image, mild transforms)
+batch of unrelated images                            ← no correlation, do not use
+```
+
+The last line is the control case. If the method shows a gain there, the
+measurement is wrong.
+
+---
+
+# 2. Basic representation
+
+Instead of treating an image set as:
+
+```text
+[N, H, W]
+```
+
+we deliberately construct a 2D representation:
+
+```text
+[Spatial, N]
+```
+
+For example, using width:
+
+```text
+[W, N]
+```
+
+or using height:
+
+```text
+[H, N]
+```
+
+A 2D convolution kernel then operates across:
+
+```text
+spatial × image-index
+```
+
+Example:
+
+```text
+3 × 3 kernel
+
+        spatial →
+       ┌─────────┐
+   n ↓ │ xxx     │
+       │ xxx     │
+       │ xxx     │
+       └─────────┘
+```
+
+The kernel therefore learns both:
+
+* spatial relationships
+* cross-image relationships
+
+without requiring a conventional Conv3D over the stack.
+
+Note the difference from the video case: `n` has **no intrinsic ordering**.
+Section 14 covers what to do about that.
+
+---
+
+# 3. Keyframe + image difference
+
+For an image set:
+
+```text
+I0 I1 I2 I3 I4 I5 ...
+```
+
+select `I0` as the keyframe.
+
+Calculate **anchored** differences:
+
+```text
+D1 = I1 - I0
+D2 = I2 - I0
+D3 = I3 - I0
+D4 = I4 - I0
+...
+```
+
+The representation becomes:
+
+```text
+I0
++
+D1
++
+D2
++
+D3
+...
+```
+
+Instead of repeatedly learning the complete information contained in every
+image, the model learns:
+
+```text
+BASE INFORMATION
+       +
+DEVIATION INFORMATION
+```
+
+### Anchored vs chained
+
+Two variants must be benchmarked against each other:
+
+```text
+Anchored:              Chained:
+
+D(n) = I(n) - I0       D(n) = I(n) - I(n-1)
+
++ no error drift       + smaller residuals when the set
++ every update is        has a natural order
+  independent          + reuses the video-style recursion
++ parallel over n      − errors accumulate along the chain
+− residuals grow       − strictly sequential
+  with distance
+  from I0
+```
+
+Anchored is the default for image sets, because there is no guaranteed
+ordering and because every `D(n)` can then be processed in parallel.
+Chained is kept as the comparison arm and becomes the natural choice for
+the video extension in section 19.
+
+---
+
+# 4. First prototype
+
+Start with a very simple experiment.
+
+Given:
+
+```text
+stack = [N, H, W]
+```
+
+choose one spatial axis.
+
+### Version A
+
+Rearrange:
+
+```text
+[H, W, N]
+```
+
+into independent:
+
+```text
+[H, N]
+```
+
+signals for each width position.
+
+Apply:
+
+```text
+Conv2D(kernel = spatial × image-index)
+```
+
+to these representations.
+
+### Version B
+
+Instead use:
+
+```text
+[W, N]
+```
+
+for each height position.
+
+This gives two possible orientations:
+
+```text
+W × N
+H × N
+```
+
+Benchmark both.
+
+---
+
+# 5. Difference representation
+
+Create two inputs:
+
+### Keyframe
+
+```text
+K = I0
+```
+
+### Residual
+
+```text
+D(n) = I(n) - I0
+```
+
+Then provide the network with:
+
+```text
+[K, D1, D2, D3, ...]
+```
+
+rather than:
+
+```text
+[I0, I1, I2, I3, ...]
+```
+
+The network should learn to reconstruct the representation of each image:
+
+```text
+Representation(n)
+    ≈
+Representation(0) + ΔRepresentation(n)
+```
+
+---
+
+# 6. Better version: learn differences in feature space
+
+Do not initially assume that pixel differences are optimal.
+
+Compare two approaches.
+
+### Pixel difference
+
+```text
+Dpixel(n) = I(n) - I0
+
+Dpixel
+   ↓
+2D spatial × index convolution
+   ↓
+feature update
+```
+
+### Feature difference
+
+First encode:
+
+```text
+I0 → Encoder → Z0
+I1 → Encoder → Z1
+```
+
+Then calculate:
+
+```text
+ΔZ1 = Z1 - Z0
+```
+
+and subsequently:
+
+```text
+ΔZn = Zn - Z0
+```
+
+The model then predicts:
+
+```text
+Zn = Z0 + ΔZn
+```
+
+Feature-space differences may be considerably more useful because irrelevant
+pixel-level changes — exposure shifts, sensor noise, sub-pixel jitter — can be
+removed by the encoder.
+
+This matters more for image sets than for video: brackets differ by a global
+gain, multi-view differs by parallax, and both produce large pixel residuals
+that carry very little actual information.
+
+---
+
+# 7. Spatial × index 2D convolution
+
+The central experimental layer is:
+
+```text
+Input: [Spatial, N]
+
+              Image index
+                   →
+        ┌─────────────┐
+Spatial │             │
+   ↓    │   Conv2D    │
+        │             │
+        └─────────────┘
+```
+
+Start with kernels:
+
+```text
+3 × 3
+5 × 3
+3 × 5
+7 × 3
+3 × 7
+```
+
+where one dimension is spatial and the other runs over the image index.
+
+The orientation matters.
+
+For example:
+
+```text
+3 spatial × 3 index
+```
+
+versus:
+
+```text
+7 spatial × 3 index
+```
+
+The index kernel should probably remain relatively small initially. For
+anchored residuals a kernel of extent 1 along `n` is also a valid arm — it
+turns the layer into a pure per-residual Conv2D and is the cheapest
+configuration. Measure whether extent > 1 along `n` buys anything at all.
+
+---
+
+# 8. Residual update architecture
+
+The main architecture should eventually look like:
+
+```text
+                  Keyframe I0
+                       │
+                       ▼
+                 Base encoder
+                       │
+                       ▼
+                      Z0
+                       │
+          ┌────────────┴────────────┐
+          │                         │
+        ΔI1                       ΔI2
+          │                         │
+          ▼                         ▼
+   spatial×index Conv2D     spatial×index Conv2D
+          │                         │
+          ▼                         ▼
+         ΔZ1                       ΔZ2
+          │                         │
+          ▼                         ▼
+       Z0 + ΔZ1                 Z0 + ΔZ2
+          │                         │
+          ▼                         ▼
+         Z1                        Z2
+```
+
+For any other image of the set:
+
+```text
+Zn = Z0 + ΔZn
+```
+
+The expensive base representation is computed **once** and reused across the
+whole set. Because every branch reads only `Z0`, all `N-1` updates are
+independent and can run as one batched kernel.
+
+---
+
+# 9. Exploit small differences
+
+Measure the distribution of:
+
+```text
+|I(n) - I0|
+```
+
+and:
+
+```text
+|Z(n) - Z0|
+```
+
+before designing specialized kernels.
+
+Determine:
+
+```text
+percentage near zero
+mean absolute difference
+maximum difference
+variance
+percentage above thresholds
+spatial clustering of the non-zero elements
+```
+
+For example:
+
+```text
+ΔZ:
+
+████████████████████████████
+████████████████████████████
+███████████████░░░░░░░░█████
+███████████████░░░░░░░░█████
+████████████████████████████
+```
+
+If a large percentage is close to zero, introduce a threshold:
+
+```text
+if abs(ΔZ) < threshold:
+    ΔZ = 0
+```
+
+This creates an opportunity for sparse or compressed processing.
+
+Report sparsity **per domain** from section 1. The number will differ by an
+order of magnitude between a burst and a multi-view pair, and a single
+average across domains hides exactly the effect being tested.
+
+Whether the non-zeros are *clustered* matters as much as how many there are.
+Scattered non-zeros defeat block-sparse kernels; residuals concentrated in a
+few regions (a moving subject, an occlusion boundary) can be processed as
+dense tiles, which is far friendlier to the GPU.
+
+---
+
+# 10. Important experiment: dense vs sparse
+
+Compare three implementations.
+
+### A — Normal
+
+```text
+Full images
+    ↓
+Dense Conv2D, per image
+```
+
+### B — Difference
+
+```text
+I0 + residuals
+    ↓
+Dense Conv2D
+```
+
+### C — Sparse difference
+
+```text
+I0 + thresholded residuals
+    ↓
+Sparse / optimized Conv2D
+```
+
+Measure:
+
+```text
+runtime
+VRAM
+FLOPs
+memory bandwidth
+accuracy
+reconstruction error
+```
+
+Do not assume C is faster until measured. Sparse computation can lose its
+advantage if the overhead of identifying and processing non-zero elements is
+too large. Note also that B does strictly more work than A unless the
+residual path is cheaper than the full path — the subtraction itself costs a
+full read of both images.
+
+---
+
+# 11. Compare against the baselines
+
+This is the critical benchmark. There are two baselines, not one.
+
+```text
+Baseline 1:
+Per-image Conv2D  (N independent passes)
+
+Baseline 2:
+Conv3D over the stack [N, H, W]
+```
+
+Compare against:
+
+```text
+Experiment 1:
+Conv2D spatial × index
+
+Experiment 2:
+Conv2D + residuals
+
+Experiment 3:
+Keyframe + residual Conv2D
+
+Experiment 4:
+Keyframe + sparse residual Conv2D
+```
+
+Keep the model capacity approximately equivalent.
+
+Compare:
+
+```text
+                     Speed
+                       │
+                       ▼
+Conv3D            ███████████████
+Per-image Conv2D  ██████████
+2D factorized     █████████
+Residual 2D       ██████
+Sparse residual   ████
+```
+
+The actual numbers must come from benchmarks.
+
+Per-image Conv2D is the honest baseline for image sets — it is what anyone
+would write today, and it is already well optimized on ROCm. Beating Conv3D
+is not sufficient; the method has to beat the obvious loop.
+
+---
+
+# 12. GPU implementation
+
+For the RX 7900 XTX (gfx1100), benchmark:
+
+```text
+PyTorch Conv2D
+PyTorch Conv3D
+aiter
+Triton
+custom HIP
+```
+
+for the same:
+
+```text
+shape
+dtype
+batch size
+kernel size
+```
+
+The interesting part is that the proposed algorithm may transform one
+expensive operation into a collection of operations that are easier to
+optimize:
+
+```text
+                Image set
+                    │
+               Difference
+                    │
+              ┌─────┴─────┐
+              │           │
+           Conv2D      residual
+              │           │
+              └─────┬─────┘
+                    │
+                  output
+```
+
+This may allow the backend selector to choose completely different kernels
+for each stage.
+
+Because the anchored form makes all `N-1` residual branches independent, the
+whole update stage collapses into a single batched Conv2D of batch `N-1`.
+That is a shape ROCm handles well, and it is a large part of the expected
+gain — possibly a larger part than the sparsity.
+
+---
+
+# 13. Fusion opportunities
+
+Once the algorithm works, investigate kernel fusion.
+
+Instead of:
+
+```text
+Image subtraction
+      ↓
+Conv2D
+      ↓
+Residual addition
+```
+
+try:
+
+```text
+Fused:
+
+(Image[n] - Image[0])
+              ↓
+          Conv2D
+              ↓
+          + Z0
+```
+
+A single GPU kernel could potentially:
+
+1. load `I0` once into LDS and keep it resident across all `n`
+2. stream `I(n)` and calculate the difference
+3. perform the convolution
+4. add the base feature `Z0`
+5. write the result
+
+`I0` (and `Z0`) being read-only and shared across every branch is the key
+structural advantage over the video case, where the operand changes at every
+step. This reduces intermediate global-memory traffic substantially.
+
+For GPU optimization, this may be more important than the theoretical
+reduction in FLOPs.
+
+---
+
+# 14. Ordering the image index
+
+The `n` axis is not a time axis and has no natural order. A convolution
+kernel with extent > 1 along `n` assumes neighbouring indices are related, so
+the ordering has to be created deliberately.
+
+Options to test:
+
+```text
+1. arbitrary / as-given      — control, expect no benefit from extent > 1
+2. capture order             — bursts, slice stacks (already ordered)
+3. sort by distance to I0    — nearest-first, residuals grow monotonically
+4. greedy similarity chain   — order by pairwise distance, cheapest first
+5. no ordering at all        — kernel extent 1 along n (see section 7)
+```
+
+If option 1 performs as well as options 2–4, then the index axis carries no
+exploitable structure and the layer should collapse to option 5. That is a
+useful negative result and should be checked early, before any kernel work.
+
+---
+
+# 15. Alignment and registration
+
+This is the step that decides whether the whole approach works for image
+sets, and it has no counterpart in the video formulation.
+
+Bursts have camera shake. Multi-view has parallax. Brackets have a global
+exposure change. Any of these makes the raw pixel residual dense even though
+the images are nearly identical in content.
+
+Measure residual sparsity in three conditions:
+
+```text
+             raw             ████████████████████  dense
+             globally        ████████░░░░░░░░░░░░  better
+             aligned
+             locally         ███░░░░░░░░░░░░░░░░░  sparse
+             aligned
+```
+
+Levels to test, cheapest first:
+
+```text
+A. none
+B. global shift (integer translation, phase correlation)
+C. global affine / homography
+D. learned local warp
+E. photometric normalisation only (gain + bias against I0)
+```
+
+Every level costs something. Record the alignment cost in the same budget as
+the convolution — a registration step that costs more than the Conv3D it
+replaces is not a win, however sparse it makes the residual.
+
+If level E alone gets most of the sparsity for brackets, and level B for
+bursts, then the cheap variants are enough and D can be dropped.
+
+---
+
+# 16. Training strategy
+
+Train progressively.
+
+### Stage 1
+
+Train a per-image Conv2D baseline and a Conv3D baseline.
+
+### Stage 2
+
+Train the factorized 2D version (`spatial × index`).
+
+### Stage 3
+
+Introduce pixel residuals against the keyframe.
+
+### Stage 4
+
+Introduce feature residuals.
+
+### Stage 5
+
+Introduce thresholding/sparsity.
+
+### Stage 6
+
+Distill the Conv3D model into the new architecture.
+
+Use the Conv3D model as the teacher:
+
+```text
+             Conv3D
+            Teacher
+               │
+               ▼
+        target features
+               │
+               │
+Set ────→ New 2D model
+               │
+               ▼
+        predicted features
+```
+
+Optimize both:
+
+```text
+task loss
++
+feature reconstruction loss
++
+cross-image consistency loss
+```
+
+Keyframe choice is itself a training decision. Train with a randomly chosen
+keyframe rather than always `I0`, so the model does not overfit to one
+position in the set and so inference can pick any image as the anchor.
+
+---
+
+# 17. The main hypothesis
+
+The project should test this hypothesis:
+
+> A set of correlated images can be efficiently modeled as one base image
+> plus learned residuals against it, so that the expensive representation is
+> computed once and reused across the whole set.
+
+Instead of:
+
+```text
+Image 0 → expensive processing
+Image 1 → expensive processing
+Image 2 → expensive processing
+Image 3 → expensive processing
+...
+```
+
+aim for:
+
+```text
+Image 0
+   ↓
+expensive base processing
+   ↓
+Z0
+   │
+   ├── Δ1 → cheap update → Z1
+   ├── Δ2 → cheap update → Z2
+   ├── Δ3 → cheap update → Z3
+   └── ...
+```
+
+The ultimate goal is therefore not simply to create a "Conv2D replacement for
+Conv3D".
+
+It is to create a **residual representation that makes most of the expensive
+computation reusable across an image set**.
+
+---
+
+# 18. First practical prototype
+
+Start very small:
+
+```text
+Image set:
+N = 8
+H = 64
+W = 64
+C = 16
+
+Baselines:
+per-image Conv2D
+Conv3D
+
+Experiment:
+I0 + ΔI1...ΔI7   (anchored)
+
+Representation:
+W × N
+
+Kernel:
+3 × 3
+
+dtype:
+FP16
+
+Data:
+one burst  +  one multi-view pair  +  one unrelated batch (control)
+```
+
+Measure:
+
+```text
+1. output error
+2. training stability
+3. inference time
+4. GPU memory
+5. number of memory reads/writes
+6. percentage of near-zero residuals, per domain
+7. alignment cost, when alignment is enabled
+```
+
+Only after this works should you move to:
+
+```text
+512×512 images
+large channel counts
+larger sets
+FP16/BF16
+RX 7900 XTX
+custom HIP/Triton kernels
+```
+
+---
+
+# 19. Extension: video
+
+Video is the special case where the set is ordered and the index axis *is*
+time. Everything above carries over with two changes:
+
+```text
+n  →  t
+anchored D(n) = I(n) - I0   →   chained D(t) = F(t) - F(t-1)
+```
+
+The chained form becomes preferable there because consecutive frames are much
+closer to each other than a late frame is to the keyframe, and the ordering
+is given for free. The recursion is then:
+
+```text
+Zt = Z(t-1) + ΔZt
+```
+
+with periodic re-anchoring on a new keyframe to stop drift — the same
+structure a video codec uses for I-frames and P-frames.
+
+The alignment question of section 15 becomes motion compensation, and section
+14 disappears entirely, since time supplies the ordering.
+
+Treat video as an arm of the same experiment, not as a separate project. If
+the image-set version fails because residuals stay dense, video is worth
+retrying anyway: its residuals are the sparsest case of all.
+
+---
+
+## Final architecture to aim for
+
+```text
+                 IMAGE SET
+                     │
+                     ▼
+                Keyframe I0
+                     │
+                     ▼
+              Base processing
+                     │
+                     ▼
+                    Z0
+                     │
+       ┌─────────────┼─────────────┐
+       │             │             │
+      ΔI1           ΔI2           ΔI3
+       │             │             │
+       ▼             ▼             ▼
+   2D spatial×   2D spatial×   2D spatial×
+   index         index         index
+       │             │             │
+       ▼             ▼             ▼
+      ΔZ1           ΔZ2           ΔZ3
+       │             │             │
+       ▼             ▼             ▼
+    Z0 + ΔZ1     Z0 + ΔZ2     Z0 + ΔZ3
+       │             │             │
+       └─────────────┴─────────────┘
+                     │
+                     ▼
+                  OUTPUT
+```
+
+The most important thing to establish experimentally is **how much
+information is actually present in the residual against the keyframe**. If
+the residuals are small, structured and clustered, this approach has a strong
+chance of being useful; if they remain dense and large — which is the
+expected outcome without the alignment step of section 15 — the advantage
+over a well-optimized per-image Conv2D will be much smaller.

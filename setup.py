@@ -257,6 +257,17 @@ _CK_TIER_SOURCES = {
         'src/cuda/ck_conv_fwd_3d_f16.cu',
         'src/cuda/ck_conv_fwd_3d_bf16.cu',
         'src/ck_conv_torch.cpp',
+        # Backward half of the tier above -- conv2d only, see
+        # src/cuda/ck_conv_bwd.hpp. Same tier as forward (not a separate
+        # env var): it shares forward's CK checkout and instance-timing
+        # cache pattern, and turning CONV off must drop these too since
+        # ck_native.cpp's AMD_TUNED_TORCH_HAS_CK_CONV guard covers both.
+        'src/cuda/ck_conv_bwd.cu',
+        'src/cuda/ck_conv_bwd_data_2d_f16.cu',
+        'src/cuda/ck_conv_bwd_data_2d_bf16.cu',
+        'src/cuda/ck_conv_bwd_weight_2d_f16.cu',
+        'src/cuda/ck_conv_bwd_weight_2d_bf16.cu',
+        'src/ck_conv_bwd_torch.cpp',
     ],
     # CK normalization tier -- fused GroupNorm+SiLU (src/cuda/ck_norm_fwd.hpp).
     # Same CK checkout, same header-only instantiation, but not the same
@@ -448,6 +459,98 @@ else:
             "loads 2.2 GB of\n                  Tensile kernel objects from "
             "$ROCM_PATH/lib/hipblaslt at runtime",
             "AMD_TUNED_TORCH_HIPBLASLT=0")
+
+# ---------------------------------------------------------------------
+# rocSPARSE SpMM tier (OPTIONAL -- src/rocsparse_spmm.hpp explains what it
+# is for: a real vendor-tuned candidate for amd_tuned_torch._patched_matmul's
+# new sparse-input fast path, amd_tuned_torch/rocsparse_ops.py, alongside
+# ATen's own generic sparse dispatch stock already has).
+#
+# Same "real LINK dependency" shape as the hipBLASLt tier just above (one
+# ordinary translation unit, no template instantiation, ROCm ships the
+# runtime library separately from the headers) -- but UNLIKE hipBLASLt,
+# rocSPARSE is NOT header-only for the vendored fallback either: its device
+# kernels live in the compiled librocsparse.so, so third_party/rocsparse
+# (this package's full copy of the upstream source, see that directory's own
+# CMakeLists.txt/install.sh) only becomes usable after building it, not by
+# pointing an include flag at its checkout the way third_party/rocm-headers
+# works for hipBLASLt. Precedence, checked in this order:
+#
+#   1. A system ROCm's rocsparse-dev package (the common case -- ROCm ships
+#      this alongside hipblaslt-dev): $ROCM_PATH/include/rocsparse/
+#      rocsparse.h + librocsparse.so under $ROCM_PATH/lib.
+#   2. A from-source build of third_party/rocsparse via its own install.sh
+#      (`cd third_party/rocsparse && ./install.sh -cd`, no flags needed for
+#      a plain library-only build against this same ROCm install) --
+#      install.sh's own default install_prefix is "rocsparse-install" under
+#      build/release/, so that is where this looks.
+#
+# Either way, src/rocsparse_spmm.cpp's #include <rocsparse/rocsparse.h> line
+# never has to change: both locations lay the header under a rocsparse/
+# subdirectory (a system -dev package's own install layout in case 1,
+# install.sh's own CMake install step reproducing that same layout in case
+# 2) -- only which directory holds it differs, which the include path below
+# absorbs. If neither is found the whole tier compiles out
+# (AMD_TUNED_TORCH_HAS_ROCSPARSE stays undefined, src/rocsparse_spmm.cpp
+# becomes an empty translation unit, and amd_tuned_torch.rocsparse_ops.
+# available() reports False) and _patched_matmul's sparse fast path falls
+# straight through to whatever ATen's own generic sparse dispatch already
+# does. Set AMD_TUNED_TORCH_ROCSPARSE=0 to force it off while iterating.
+_want_rocsparse = os.environ.get("AMD_TUNED_TORCH_ROCSPARSE", "1") != "0"
+_rocsparse_system_include = os.path.join(_rocm_path, 'include')
+_rocsparse_system_libdir = os.path.join(_rocm_path, 'lib')
+_rocsparse_vendored_root = os.path.join(
+    _here, 'third_party', 'rocsparse', 'build', 'release', 'rocsparse-install')
+_rocsparse_vendored_include = os.path.join(_rocsparse_vendored_root, 'include')
+_rocsparse_vendored_libdir = os.path.join(_rocsparse_vendored_root, 'lib')
+
+
+def _has_rocsparse_at(include_dir, libdir):
+    return (os.path.isfile(os.path.join(include_dir, 'rocsparse', 'rocsparse.h'))
+            and any(os.path.exists(os.path.join(libdir, name))
+                    for name in ('librocsparse.so', 'librocsparse.so.1')))
+
+
+if _has_rocsparse_at(_rocsparse_system_include, _rocsparse_system_libdir):
+    _rocsparse_include, _rocsparse_libdir = _rocsparse_system_include, _rocsparse_system_libdir
+    _rocsparse_found_at = f"system ROCm at {_rocm_path}"
+elif _has_rocsparse_at(_rocsparse_vendored_include, _rocsparse_vendored_libdir):
+    _rocsparse_include, _rocsparse_libdir = _rocsparse_vendored_include, _rocsparse_vendored_libdir
+    _rocsparse_found_at = f"vendored build at {os.path.abspath(_rocsparse_vendored_root)}"
+else:
+    _rocsparse_include, _rocsparse_libdir, _rocsparse_found_at = None, None, None
+
+_have_rocsparse = _want_rocsparse and _rocsparse_include is not None
+
+# src/rocsparse_spmm.cpp is compiled either way -- it is #ifdef'd on
+# AMD_TUNED_TORCH_HAS_ROCSPARSE internally and collapses to nothing when the
+# tier is off, same "compiled either way" convention as
+# src/hipblaslt_gemm.cpp.
+_rocsparse_sources = ['src/rocsparse_spmm.cpp']
+_rocsparse_includes = []
+_rocsparse_libdirs = []
+_rocsparse_libs = []
+_rocsparse_defines = []
+if _have_rocsparse:
+    _rocsparse_includes = [_rocsparse_include]
+    _rocsparse_libdirs = [_rocsparse_libdir]
+    _rocsparse_libs = ['rocsparse']
+    _rocsparse_defines = ['-DAMD_TUNED_TORCH_HAS_ROCSPARSE=1']
+    print(f"setup.py: rocSPARSE SpMM tier ENABLED (rocSPARSE from {_rocsparse_found_at})")
+elif not _want_rocsparse:
+    # AMD_TUNED_TORCH_ROCSPARSE=0: declined on purpose, not absent.
+    print("setup.py: rocSPARSE SpMM tier DISABLED (AMD_TUNED_TORCH_ROCSPARSE=0)")
+else:
+    _missing(
+        "rocSPARSE headers+library (rocsparse/rocsparse.h + librocsparse.so)",
+        [os.path.join(_rocsparse_system_include, 'rocsparse', 'rocsparse.h'),
+         os.path.join(_rocsparse_system_libdir, 'librocsparse.so'),
+         os.path.join(_rocsparse_vendored_include, 'rocsparse', 'rocsparse.h'),
+         os.path.join(_rocsparse_vendored_libdir, 'librocsparse.so')],
+        "apt install rocsparse-dev  (or the equivalent -devel package); or build the "
+        "vendored copy:\n                  cd third_party/rocsparse && ./install.sh -cd",
+        "AMD_TUNED_TORCH_ROCSPARSE=0 -- _patched_matmul's sparse-input fast path stays "
+        "on ATen's\n                  own generic sparse dispatch")
 
 # Parallel build. torch's BuildExtension parallelises ONLY through ninja;
 # with use_ninja=False it falls through to distutils, which compiles the
@@ -1341,6 +1444,11 @@ setup(
                 # iu4_gemm_supported() and never wired into kernel_select --
                 # see amd_tuned_torch/iu4_gemm_ops.py.
                 'src/cuda/iu4_gemm_fwd.cu',
+                # BOFT's block-diagonal assembly/disassembly kernel, ported
+                # from source/peft's own optional fbd CUDA extension -- see
+                # amd_tuned_torch/boft_ops.py. Always built (no external
+                # dependency beyond hipcc, same as group_norm/conv above).
+                'src/cuda/fast_block_diag.cu',
                 'src/main_rocm.cpp',
             ] + _generated_conv2d_fp16 + _generated_conv3d_fp16,
             include_dirs=_rocwmma_includes,
@@ -1409,6 +1517,24 @@ setup(
             runtime_library_dirs=_hipblaslt_libdirs,
             extra_compile_args={
                 'cxx': ['-O3'] + _hipblaslt_defines,
+            },
+        ),
+        # rocSPARSE -- always built, same "compiled either way" convention
+        # as the hipBLASLt tier just above it (src/rocsparse_spmm.cpp is
+        # internally #ifdef'd on AMD_TUNED_TORCH_HAS_ROCSPARSE). No .cu
+        # sources here either, so no rocWMMA/offload-arch nvcc flags.
+        CUDAExtension(
+            name='amd_tuned_torch._native_rocsparse',
+            sources=['src/rocsparse_native.cpp'] + _rocsparse_sources,
+            include_dirs=_rocsparse_includes,
+            library_dirs=_rocsparse_libdirs,
+            libraries=_rocsparse_libs,
+            # Same RPATH reasoning as the hipBLASLt tier: bake the runtime
+            # library's location into the .so so the loader doesn't have to
+            # find it via LD_LIBRARY_PATH/ldconfig at import time.
+            runtime_library_dirs=_rocsparse_libdirs,
+            extra_compile_args={
+                'cxx': ['-O3'] + _rocsparse_defines,
             },
         ),
         # Vendored depthwise conv1d (amd_tuned_torch/_vendor/

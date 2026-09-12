@@ -74,6 +74,80 @@ class TestFftConv2d3dMatchDirect:
         torch.testing.assert_close(actual, expected, rtol=1e-3, atol=1e-4)
 
 
+class TestGroupedConv:
+    """`groups` reaches fft_conv unfiltered from both the public
+    fft_convNd entry points and the conv1d/2d/3d auto-patch candidates, so
+    every grouping shape has to work. The `Cout/groups > 1` cases below
+    used to raise `RuntimeError: view size is not compatible ...` out of
+    complex_matmul's final `view` -- see that function's docstring."""
+
+    @pytest.mark.parametrize("groups,cin,cout", [(2, 4, 6), (8, 16, 16), (4, 8, 4)])
+    def test_matches_direct_conv1d(self, groups, cin, cout):
+        x = _rand(2, cin, 128)
+        w = _rand(cout, cin // groups, 17)
+        b = _rand(cout)
+        expected = F.conv1d(x, w, bias=b, padding=8, groups=groups)
+        actual = fftconv_ops.fft_conv1d(x, w, bias=b, padding=8, groups=groups)
+        torch.testing.assert_close(actual, expected, rtol=1e-3, atol=1e-4)
+
+    def test_depthwise_with_channel_multiplier(self):
+        """Cin/groups == 1 but Cout > groups -- not the elementwise
+        depthwise case, so it must take complex_matmul's einsum branch."""
+        x = _rand(2, 4, 96)
+        w = _rand(8, 1, 9)
+        expected = F.conv1d(x, w, padding=4, groups=4)
+        actual = fftconv_ops.fft_conv1d(x, w, padding=4, groups=4)
+        torch.testing.assert_close(actual, expected, rtol=1e-3, atol=1e-4)
+
+    def test_matches_direct_conv2d(self):
+        x = _rand(1, 4, 24, 24)
+        w = _rand(6, 2, 5, 5)
+        expected = F.conv2d(x, w, padding=2, groups=2)
+        actual = fftconv_ops.fft_conv2d(x, w, padding=2, groups=2)
+        torch.testing.assert_close(actual, expected, rtol=1e-3, atol=1e-4)
+
+
+class TestComplexMatmul:
+    """complex_matmul is the frequency-domain contraction rewritten as an
+    einsum for layout reasons (6-80x on gfx1100, see its docstring). This
+    pins it against the reshaped-`@` formulation it replaced, which is the
+    definition of the contraction it has to keep computing."""
+
+    @staticmethod
+    def _reference(a, b, groups):
+        a = a.view(a.size(0), groups, -1, *a.shape[2:])
+        b = b.view(groups, -1, *b.shape[1:])
+        a = torch.movedim(a, 2, a.dim() - 1).unsqueeze(-2)
+        b = torch.movedim(b, (1, 2), (b.dim() - 1, b.dim() - 2))
+        c = torch.movedim(a @ b, -1, 2).squeeze(-1)
+        return c.reshape(c.size(0), -1, *c.shape[3:])
+
+    @pytest.mark.parametrize("groups,cin,cout", [(1, 8, 6), (2, 8, 6), (4, 4, 4), (4, 4, 8)])
+    def test_matches_reshaped_matmul(self, groups, cin, cout):
+        a = torch.randn(3, cin, 17, dtype=torch.complex64)
+        b = torch.randn(cout, cin // groups, 17, dtype=torch.complex64)
+        torch.testing.assert_close(
+            fftconv_ops.complex_matmul(a, b, groups=groups),
+            self._reference(a, b, groups),
+        )
+
+    def test_preserves_nd_frequency_shape(self):
+        a = torch.randn(2, 4, 5, 7, dtype=torch.complex64)
+        b = torch.randn(6, 2, 5, 7, dtype=torch.complex64)
+        out = fftconv_ops.complex_matmul(a, b, groups=2)
+        assert out.shape == (2, 6, 5, 7)
+        torch.testing.assert_close(out, self._reference(a, b, 2))
+
+    def test_is_differentiable(self):
+        """fft_conv's autograd is built entirely from differentiable
+        primitives (module docstring) -- both branches here included."""
+        for groups, cin, cout in ((1, 4, 4), (4, 4, 4)):
+            a = torch.randn(2, cin, 9, dtype=torch.complex64, requires_grad=True)
+            b = torch.randn(cout, cin // groups, 9, dtype=torch.complex64, requires_grad=True)
+            fftconv_ops.complex_matmul(a, b, groups=groups).abs().sum().backward()
+            assert a.grad is not None and b.grad is not None
+
+
 class TestMixedPrecisionWindow:
     """fft_conv's MIXED PRECISION contract: dilation expansion (torch.kron)
     and padding (F.pad) stay in the caller's storage dtype (fp16/bf16),
