@@ -417,3 +417,46 @@ class TestGradSafe:
 
     def test_ignores_non_tensor_arguments(self):
         assert miopen_fallback_module._grad_safe(None, "not a tensor", 42) is True
+
+
+class TestSparseConv1dDeclinesTensorSubclasses:
+    """FlexGEMM's kernels read dense storage, so a Tensor subclass reaching
+    them fails as an illegal memory access from inside the subclass's own
+    dispatch fallback -- not as a catchable exception. Same guard, and same
+    reason, as amd_tuned_torch._dispatch._usable."""
+
+    class _FakeQuantizedTensor(torch.Tensor):
+        pass
+
+    def test_predicate_accepts_plain_tensors_and_none(self):
+        assert miopen_fallback_module._is_plain_tensor(torch.zeros(2)) is True
+        assert miopen_fallback_module._is_plain_tensor(torch.nn.Parameter(torch.zeros(2))) is True
+        assert miopen_fallback_module._is_plain_tensor(None) is True, "bias is legitimately None"
+
+    def test_predicate_rejects_a_subclass(self):
+        assert miopen_fallback_module._is_plain_tensor(
+            self._FakeQuantizedTensor(torch.zeros(2))) is False
+
+    def test_fastpath_declines_a_quantized_weight(self, monkeypatch):
+        called = []
+        monkeypatch.setattr(
+            miopen_fallback_module.flexgemm_ops, "maybe_sparse_conv1d",
+            lambda *a, **k: called.append(1))
+
+        x = torch.zeros(1, 4, 64)
+        w = self._FakeQuantizedTensor(torch.zeros(4, 4, 3))
+        assert miopen_fallback_module._try_sparse_conv1d_fastpath(
+            x, w, None, 1, 0, 1, 1) is None
+        assert not called, "FlexGEMM must never be reached with a subclass"
+
+    def test_fastpath_still_reaches_flexgemm_for_plain_tensors(self, monkeypatch):
+        """The guard must not disable the fast path for ordinary tensors."""
+        sentinel = torch.zeros(1, 4, 62)
+        monkeypatch.setattr(
+            miopen_fallback_module.flexgemm_ops, "maybe_sparse_conv1d",
+            lambda *a, **k: sentinel)
+
+        x = torch.zeros(1, 4, 64)
+        w = torch.zeros(4, 4, 3)
+        assert miopen_fallback_module._try_sparse_conv1d_fastpath(
+            x, w, None, 1, 0, 1, 1) is sentinel

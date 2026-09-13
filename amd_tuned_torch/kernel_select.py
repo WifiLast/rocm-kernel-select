@@ -183,13 +183,47 @@ def _reference_scale(reference_out) -> "Optional[float]":
     return scale if math.isfinite(scale) and scale > 0.0 else None
 
 
-def _verify(candidate_out, reference_out, tolerance: "Optional[tuple[float, float]]" = None) -> bool:
-    """Best-effort numerical agreement check. A comparison that itself
-    can't run (shape mismatch, an exotic dtype, a non-tensor return) is
-    treated as a verification FAILURE, not a pass -- unlike a thunk
-    returning None (a candidate declining a problem it recognizes it can't
-    handle), "couldn't even compare" must never be silently treated as
-    "fine".
+_VERIFY_CHUNK_ELEMENTS = 1 << 23  # 8.4M elements -> ~32MB per upcast slice
+
+
+def _is_oom(exc: BaseException) -> bool:
+    """True for an out-of-memory failure, whatever this torch spells it.
+
+    torch.OutOfMemoryError IS a RuntimeError subclass (checked: its MRO is
+    OutOfMemoryError -> RuntimeError -> Exception), which is exactly how an
+    OOM used to be laundered into a correctness verdict here. The message
+    check covers a torch that raises a bare RuntimeError instead, and older
+    ones that only have torch.cuda.OutOfMemoryError."""
+    for attr in (getattr(torch, "OutOfMemoryError", None),
+                 getattr(getattr(torch, "cuda", None), "OutOfMemoryError", None)):
+        if isinstance(attr, type) and isinstance(exc, attr):
+            return True
+    return "out of memory" in str(exc).lower()
+
+
+def _verify(candidate_out, reference_out, tolerance: "Optional[tuple[float, float]]" = None):
+    """Best-effort numerical agreement check. Returns True (agrees), False
+    (disagrees -- a judgement worth recording), or None (INDETERMINATE: the
+    comparison itself ran out of memory, which is not a judgement about the
+    kernel and must never be recorded as one).
+
+    A comparison that can't run for a reason that IS about the candidate
+    (shape mismatch, an exotic dtype, a non-tensor return) is still treated
+    as a verification FAILURE, not a pass -- unlike a thunk returning None
+    (a candidate declining a problem it recognizes it can't handle),
+    "couldn't even compare" must never be silently treated as "fine".
+
+    MEMORY. The comparison runs in slices, upcasting a few MB at a time.
+    `torch.allclose` over a whole tensor is an AND over its elements, so
+    chunking is exact rather than a sampling approximation -- and it keeps
+    this function off the list of the library's large allocations. It used
+    to top that list: `candidate_out.float()` and `reference_out.float()`
+    each materialize a FULL fp32 copy, so verifying a 2,000,000x1024 fp16
+    linear asked for 8.19 GB twice. On a 24 GB card already holding a 23 GB
+    model that OOMs, the OOM was caught as an ordinary RuntimeError, and
+    the candidate was permanently blacklisted for a shape it computed
+    perfectly well. Every `linear` entry in the shipped blacklist was of
+    that kind -- M between 174593 and 2000000.
 
     THE BAR IS RELATIVE TO THE OUTPUT'S MAGNITUDE, not absolute. `atol`
     from the table below (or from `tolerance`) is a floor; the bar
@@ -238,22 +272,41 @@ def _verify(candidate_out, reference_out, tolerance: "Optional[tuple[float, floa
         scale = _reference_scale(reference_out)
         if scale is not None:
             atol = max(atol, rtol * scale)
-        return bool(torch.allclose(candidate_out.float(), reference_out.float(),
-                                    rtol=rtol, atol=atol, equal_nan=True))
-    except (RuntimeError, TypeError, ValueError, AttributeError):
-        return False
+        if candidate_out.shape != reference_out.shape:
+            return False
+        if candidate_out.dim() == 0:
+            return bool(torch.allclose(candidate_out.float(), reference_out.float(),
+                                        rtol=rtol, atol=atol, equal_nan=True))
+        # Slice along dim 0 rather than reshaping: a slice is always a view,
+        # where .reshape(-1)/.flatten() on a non-contiguous output would
+        # copy the whole thing and reintroduce the allocation this avoids.
+        n_rows = candidate_out.shape[0]
+        per_row = max(1, candidate_out.numel() // max(1, n_rows))
+        rows_per_chunk = max(1, _VERIFY_CHUNK_ELEMENTS // per_row)
+        for start in range(0, n_rows, rows_per_chunk):
+            stop = min(start + rows_per_chunk, n_rows)
+            if not torch.allclose(candidate_out[start:stop].float(),
+                                   reference_out[start:stop].float(),
+                                   rtol=rtol, atol=atol, equal_nan=True):
+                return False
+        return True
+    except (RuntimeError, TypeError, ValueError, AttributeError) as exc:
+        # An OOM says nothing about whether the kernel is correct.
+        return None if _is_oom(exc) else False
 
 # Bumped whenever _verify's bar changes. A blacklist entry is a RECORD OF
 # A JUDGEMENT, not a fact about the kernel: an entry written when the bar
 # was purely absolute (see _verify's docstring for the three correct
-# kernels that bar rejected) is not evidence under the current one, and
+# kernels that bar rejected) -- or, at version 2, by a comparison that
+# reported an out-of-memory failure as a numerical mismatch -- is not
+# evidence under the current one, and
 # without this it would outlive the fix forever -- the entries are
 # persisted, and a cached winner short-circuits the contest that would
 # otherwise re-measure. On a version mismatch the blacklist is dropped
 # AND the winners for exactly those shapes are dropped with it, so each
 # affected shape is re-contested once and every other cached decision
 # survives untouched.
-_VERIFY_BAR_VERSION = 2
+_VERIFY_BAR_VERSION = 3
 _DISK_CACHE_ENABLED = os.environ.get("AMD_TUNED_TORCH_KERNEL_SELECT_CACHE", "1") != "0"
 _CACHE_DIR = os.environ.get(
     "AMD_TUNED_TORCH_KERNEL_SELECT_CACHE_DIR",
@@ -540,8 +593,18 @@ def _contest(key, candidates: "list[tuple[str, Callable]]",
     # must never win just because nothing timed it out.
     _UNSET = object()
     reference_out = _UNSET
+    reference_oom = False
     for ms, name, thunk in ranked:
-        out = thunk()
+        # An OOM here is the candidate failing to run, not the caller's
+        # problem: without this it propagated out of the contest and killed
+        # the application, even though a slower candidate (ultimately the
+        # reference) could still have served the call.
+        try:
+            out = thunk()
+        except (RuntimeError, TypeError, AssertionError) as exc:
+            if not _is_oom(exc):
+                raise
+            out = None
         if out is None:
             continue
         if name == reference_name or not _VERIFY_ENABLED:
@@ -553,22 +616,57 @@ def _contest(key, candidates: "list[tuple[str, Callable]]",
             reference_out = None
             for ref_name, ref_thunk in candidates:
                 if ref_name == reference_name:
-                    reference_out = ref_thunk()
+                    # Same guard as the candidate loop above. A reference
+                    # that cannot be computed right now is handled below as
+                    # "nothing to verify against", not as a crash.
+                    try:
+                        reference_out = ref_thunk()
+                    except (RuntimeError, TypeError, AssertionError) as exc:
+                        if not _is_oom(exc):
+                            raise
+                        reference_out = None
+                        reference_oom = True
                     break
             if reference_out is None:
                 # The reference itself -- "assumed to always work" by every
                 # call site's own convention -- declined this round. Nothing
                 # to verify against, so accept the fastest candidate rather
                 # than wrongly blacklist it for a problem that isn't its own.
+                #
+                # Unless it was an OOM that stopped it, in which case this
+                # round is evidence of nothing at all: serve the call from
+                # the candidate already computed, but cache no winner, so
+                # the shape gets a real contest once memory allows one.
+                if reference_oom:
+                    return out
                 with _lock:
                     _winners[key] = name
                 _save_disk_cache()
                 return out
-        if _verify(out, reference_out, tolerance=tolerance):
+        verdict = _verify(out, reference_out, tolerance=tolerance)
+        if verdict:
             with _lock:
                 _winners[key] = name
             _save_disk_cache()
             return out
+        if verdict is None:
+            # INDETERMINATE -- the comparison ran out of memory, so nothing
+            # was learned about this candidate. Record NOTHING: no winner
+            # (a decision made under memory pressure is not evidence about
+            # which kernel is faster either) and above all no blacklist
+            # entry, which is permanent and persisted to disk. Hand back the
+            # reference, which is correct by every call site's convention,
+            # and let a later call under less pressure hold the contest
+            # properly.
+            warnings.warn(
+                f"amd_tuned_torch.kernel_select: ran out of memory verifying "
+                f"candidate '{name}' for {key} against '{reference_name}'. No "
+                "judgement recorded -- using the reference for this call and "
+                "leaving the shape to be contested again later. This is a "
+                "memory-pressure event, NOT evidence that the candidate is wrong.",
+                UserWarning,
+            )
+            return reference_out
         warnings.warn(
             f"amd_tuned_torch.kernel_select: candidate '{name}' for {key} measured "
             f"fastest but its output didn't match '{reference_name}' within tolerance "
@@ -581,6 +679,8 @@ def _contest(key, candidates: "list[tuple[str, Callable]]",
             _bad_candidates.setdefault(key, set()).add(name)
         _save_disk_cache()
 
+    if reference_oom:
+        return reference_out if reference_out not in (_UNSET, None) else None
     if reference_out not in (_UNSET, None):
         # Every non-reference candidate that measured fine either failed
         # verification or isn't reached here at all (already returned) --

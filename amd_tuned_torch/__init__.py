@@ -333,6 +333,18 @@ stock PyTorch. Verify
 `python -c "import transformer_engine.pytorch"` works cleanly on its own
 before setting AMD_TUNED_TORCH_ENABLE_TE=1.
 
+The same AMD_TUNED_TORCH_ENABLE_TE gate also governs amd_tuned_torch.te_extra_ops,
+which is TransformerEngine's *other* half: kernels reached by name rather
+than by patching over a stock op. Nothing in it is installed by enable().
+Four families, chosen because they are the parts of TE that survive on
+gfx1100 (TE's fused attention is CDNA-only and its FP8 path needs gfx94x+,
+so neither is reachable here) and that no other backend in this package
+already covers -- fused multi-tensor optimizer steps
+(multi_tensor_adam/sgd/l2norm/scale), fused scaled softmax
+(scaled_softmax/scaled_softmax_or_torch), bit-masked dropout, and ragged
+sequence-layout plumbing (thd_to_bshd/bshd_to_thd/pad_rows/copy_to_kv_cache).
+See te_extra_ops.py's module docstring for why those four and not others.
+
 SAFETY
 ------
 linear/matmul/bmm (aiter Triton kernels), conv2d/conv3d (native HIP
@@ -411,6 +423,7 @@ def native_build_info() -> str:
 
 from . import rocm_env_check
 from . import te_ops
+from . import te_extra_ops
 from . import aiter_ops
 from . import flash_attn_rocwmma_ops
 from . import triton_kernels_ops

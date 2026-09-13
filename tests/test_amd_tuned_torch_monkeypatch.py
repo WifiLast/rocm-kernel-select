@@ -172,6 +172,68 @@ class TestUsable:
         monkeypatch.setattr(torch.Tensor, "is_cuda", property(lambda self: True))
         assert amd_tuned_torch._usable(x, dtypes=amd_tuned_torch._TE_DTYPES) is True
 
+    # -- Tensor SUBCLASSES ------------------------------------------------
+    #
+    # Every accelerated path eventually hands its argument to a HIP kernel
+    # or a torch.library custom op that reads dense storage directly, so a
+    # subclass with its own dispatch semantics must never get that far.
+    #
+    # The failure this guards against was not a clean decline. A quantized
+    # weight (optimum.quanto's QBytesTensor, reached through mmgp's
+    # quant_router) is a Tensor subclass reporting .is_cuda True and a
+    # .dtype of float16 -- the DEQUANTIZED dtype -- so it passed the
+    # isinstance/dtype gate and went straight into
+    # compile_ops.ck_gemm_linear. The custom op then dispatched into
+    # quanto's __torch_dispatch__, which did not recognize it, fell back to
+    # dequantizing every argument, and ended in
+    # "CUDA error: an illegal memory access was encountered" -- not an
+    # exception any fallback path here could have caught.
+
+    class _FakeQuantizedTensor(torch.Tensor):
+        """Stands in for quanto's QBytesTensor: a Tensor subclass that looks
+        like an ordinary fp16 CUDA tensor to any isinstance/dtype check."""
+
+    def test_false_for_a_tensor_subclass(self, monkeypatch):
+        x = self._FakeQuantizedTensor(torch.zeros(2, dtype=torch.float16))
+        monkeypatch.setattr(torch.Tensor, "is_cuda", property(lambda self: True))
+        assert isinstance(x, torch.Tensor), "isinstance cannot tell the difference"
+        assert x.dtype is torch.float16, "nor can the dtype allowlist"
+        assert amd_tuned_torch._usable(x) is False
+
+    def test_false_when_only_the_weight_is_a_subclass(self, monkeypatch):
+        """The reported shape exactly: a plain activation times a quantized
+        weight, which is how F.linear is called from quant_router."""
+        monkeypatch.setattr(torch.Tensor, "is_cuda", property(lambda self: True))
+        activation = torch.zeros(2, dtype=torch.float16)
+        weight = self._FakeQuantizedTensor(torch.zeros(2, 2, dtype=torch.float16))
+        assert amd_tuned_torch._usable(activation, weight) is False
+
+    def test_true_for_a_plain_parameter(self, monkeypatch):
+        """Parameter is itself a Tensor subclass but is plain storage, and
+        every weight in every patched module is one -- excluding it would
+        disable the whole package."""
+        monkeypatch.setattr(torch.Tensor, "is_cuda", property(lambda self: True))
+        w = torch.nn.Parameter(torch.zeros(2, 2, dtype=torch.float16))
+        assert amd_tuned_torch._usable(w) is True
+
+    def test_is_plain_tensor_predicate(self, monkeypatch):
+        assert amd_tuned_torch._dispatch._is_plain_tensor(torch.zeros(2)) is True
+        assert amd_tuned_torch._dispatch._is_plain_tensor(
+            torch.nn.Parameter(torch.zeros(2))) is True
+        assert amd_tuned_torch._dispatch._is_plain_tensor(
+            self._FakeQuantizedTensor(torch.zeros(2))) is False
+
+    def test_subclass_declines_every_dtype_set(self, monkeypatch):
+        """Not just the GEMM tiers -- group_norm and the TE-backed ops pass
+        their own wider `dtypes=`, and hand their arguments to kernels with
+        the same requirement."""
+        monkeypatch.setattr(torch.Tensor, "is_cuda", property(lambda self: True))
+        x = self._FakeQuantizedTensor(torch.zeros(2, dtype=torch.float32))
+        for dtypes in (amd_tuned_torch._GEMM_DTYPES,
+                       amd_tuned_torch._GROUPNORM_DTYPES,
+                       amd_tuned_torch._TE_DTYPES):
+            assert amd_tuned_torch._usable(x, dtypes=dtypes) is False
+
 
 # ---------------------------------------------------------------------------
 # _install / _restore / enable / disable / is_enabled

@@ -156,10 +156,42 @@ def _grad_safe(*tensors: Any) -> bool:
     return True
 
 
+# Types this package's kernels can actually be handed. Every accelerated
+# path below eventually reaches a HIP kernel or a torch.library custom op
+# that reads a dense tensor's storage directly, so the argument has to BE a
+# dense tensor -- not something that merely quacks like one.
+#
+# torch.Tensor SUBCLASSES do not qualify, and `isinstance` cannot tell the
+# difference. A quantized weight (optimum.quanto's QBytesTensor, as reached
+# through mmgp's quant_router) is a Tensor subclass that reports
+# `.is_cuda == True` and a `.dtype` of float16 -- the DEQUANTIZED dtype --
+# so it passed the old isinstance/dtype gate untouched and was handed
+# straight to compile_ops.ck_gemm_linear. What happens then is not a clean
+# decline: the custom op dispatches into quanto's __torch_dispatch__, which
+# does not recognize it, falls back to dequantizing every argument, and the
+# whole thing ends in an illegal memory access rather than an exception any
+# of the fallback paths here could have caught.
+#
+# Declining sends the call to the stock op, which is exactly where such a
+# tensor wants to go: quanto's own __torch_function__ intercepts F.linear
+# and runs its proper quantized path. The same reasoning covers every other
+# subclass with custom dispatch semantics -- DTensor, FakeTensor, functorch
+# wrappers -- so the test is an exact type match rather than a blocklist of
+# the ones seen so far.
+_PLAIN_TENSOR_TYPES = (torch.Tensor, torch.nn.Parameter)
+
+
+def _is_plain_tensor(t: Any) -> bool:
+    """True only for a dense tensor this package's kernels can read."""
+    return type(t) in _PLAIN_TENSOR_TYPES
+
+
 def _usable(*tensors: Any, dtypes: tuple = _GEMM_DTYPES) -> bool:
     for t in tensors:
         if not isinstance(t, torch.Tensor):
             continue
+        if not _is_plain_tensor(t):
+            return False  # a Tensor subclass -- see _PLAIN_TENSOR_TYPES above
         if not t.is_cuda or t.dtype not in dtypes:
             return False
     return True
@@ -928,7 +960,14 @@ def _conv2d_accelerated_forward(input, weight, bias, stride, padding, dilation, 
     # pure-Python gather/scatter instead, which measured 20-60x SLOWER than
     # stock on exactly the sparse inputs it accepted (numbers in
     # maybe_sparse_conv2d's docstring).
-    if flexgemm_ops.sparse_conv2d_enabled() and input.dim() == 4 and weight.dim() == 4:
+    # _is_plain_tensor, not just dim(): this branch runs BEFORE any _usable
+    # check in this function, and FlexGEMM's kernels read dense storage the
+    # same way the GEMM tiers do. A Tensor subclass (a quantized weight, say)
+    # reaching them fails the way it did in F.linear -- an illegal memory
+    # access from inside the subclass's own dispatch fallback, not a catchable
+    # exception. See _PLAIN_TENSOR_TYPES.
+    if (flexgemm_ops.sparse_conv2d_enabled() and input.dim() == 4 and weight.dim() == 4
+            and _is_plain_tensor(input) and _is_plain_tensor(weight)):
         _sparse_out = flexgemm_ops.maybe_sparse_conv2d(
             input, weight, bias, stride=aiter_ops._pair(stride),
             padding=aiter_ops._pair(padding), dilation=aiter_ops._pair(dilation))
@@ -1046,7 +1085,9 @@ def _patched_conv3d(input, weight, bias=None, stride=1, padding=0, dilation=1, g
     # disabled it, or occupancy is at/above the threshold -- so a normal
     # dense conv3d call pays only the one reduction pass, never a wasted
     # sparse-kernel attempt.
-    if flexgemm_ops.sparse_conv3d_enabled() and input.dim() == 5 and weight.dim() == 5:
+    # Same subclass guard as the conv2d sparse path above.
+    if (flexgemm_ops.sparse_conv3d_enabled() and input.dim() == 5 and weight.dim() == 5
+            and _is_plain_tensor(input) and _is_plain_tensor(weight)):
         _sparse_out = flexgemm_ops.maybe_sparse_conv3d(
             input, weight, bias, stride=_triple(stride), padding=_triple(padding),
             dilation=_triple(dilation))

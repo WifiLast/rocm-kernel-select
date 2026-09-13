@@ -1431,3 +1431,131 @@ class TestSparseFastPathNeedsTheNativeKernel:
         x = torch.randn(1, 4, 128, 128)     # occupancy 1.0
         assert flexgemm_ops_module.maybe_sparse_conv2d(
             x, torch.randn(4, 4, 3, 3), None, padding=(1, 1)) is None
+
+
+class TestKernelVolumeCeiling:
+    """FlexGEMM's masked-implicit-GEMM kernels encode each neighbour's tap
+    membership as a bitmask in one uint32, so a kernel of more than 32
+    elements cannot be represented. FlexGEMM enforces that with a bare
+    `assert` rather than a distinguishable exception -- which is not in the
+    "unsupported shape" except-tuples this module uses, so before
+    _kernel_volume_supported() existed it escaped every layer and killed the
+    calling process.
+
+    The real report: Hunyuan3D-2's mesh_render.back_project() convolves a
+    mask with a box kernel sized (2/512 * resolution) * 2 + 1 -- 17x17 = 289
+    taps at 2048px, 9x9 = 81 at 1024px. Only 512px and below stays under 32.
+    """
+
+    @pytest.mark.parametrize(
+        "dims,expected",
+        [
+            ((3, 3), True),        # 9
+            ((5, 5), True),        # 25
+            ((32,), True),         # exactly at the ceiling
+            ((33,), False),        # one past it
+            ((3, 3, 3), True),     # 27
+            ((5, 5, 5), False),    # 125
+            ((9, 9), False),       # Hunyuan3D-2 at 1024px
+            ((17, 17), False),     # Hunyuan3D-2 at 2048px
+        ],
+    )
+    def test_volume_predicate(self, dims, expected):
+        assert flexgemm_ops_module._kernel_volume_supported(*dims) is expected
+
+    def _sparse_input(self, size=256, stride=16):
+        x = torch.zeros(1, 1, size, size)
+        x[0, 0, ::stride, ::stride] = 1.0
+        return x
+
+    def test_maybe_sparse_conv2d_declines_an_oversized_kernel(self, monkeypatch):
+        """The exact reported shape. Declining means returning None so the
+        caller's dense path runs -- not raising, and not crashing."""
+        monkeypatch.setattr(flexgemm_ops_module, "sparse_conv2d_enabled", lambda: True)
+        monkeypatch.setattr(flexgemm_ops_module, "available", lambda: True)
+        x = self._sparse_input()
+        weight = torch.ones(1, 1, 17, 17)
+        assert flexgemm_ops_module.maybe_sparse_conv2d(
+            x, weight, None, padding=(8, 8)) is None
+
+    def test_maybe_sparse_conv2d_declines_before_converting_to_sparse(self, monkeypatch):
+        """The check has to come before the O(B*C*H*W) densify, or an
+        oversized kernel pays the whole conversion just to be rejected."""
+        monkeypatch.setattr(flexgemm_ops_module, "sparse_conv2d_enabled", lambda: True)
+        monkeypatch.setattr(flexgemm_ops_module, "available", lambda: True)
+        from_dense = MagicMock()
+        monkeypatch.setattr(flexgemm_ops_module, "sparse_conv2d_from_dense", from_dense)
+
+        flexgemm_ops_module.maybe_sparse_conv2d(
+            self._sparse_input(), torch.ones(1, 1, 17, 17), None, padding=(8, 8))
+
+        from_dense.assert_not_called()
+
+    def test_maybe_sparse_conv2d_still_accepts_a_kernel_that_fits(self, monkeypatch):
+        """The gate must not cost anyone the fast path for ordinary 3x3."""
+        monkeypatch.setattr(flexgemm_ops_module, "sparse_conv2d_enabled", lambda: True)
+        monkeypatch.setattr(flexgemm_ops_module, "available", lambda: True)
+        x = self._sparse_input()
+        weight = torch.randn(1, 1, 3, 3)
+        out = flexgemm_ops_module.maybe_sparse_conv2d(x, weight, None, padding=(1, 1))
+        assert out is not None
+        torch.testing.assert_close(out, F.conv2d(x, weight, None, 1, 1),
+                                   rtol=1e-4, atol=1e-4)
+
+    def test_maybe_sparse_conv3d_declines_an_oversized_kernel(self, monkeypatch):
+        monkeypatch.setattr(flexgemm_ops_module, "sparse_conv3d_enabled", lambda: True)
+        monkeypatch.setattr(flexgemm_ops_module, "available", lambda: True)
+        x = torch.zeros(1, 1, 32, 32, 32)
+        x[0, 0, ::8, ::8, ::8] = 1.0
+        assert flexgemm_ops_module.maybe_sparse_conv3d(
+            x, torch.ones(1, 1, 5, 5, 5), None, padding=(2, 2, 2)) is None
+
+    def test_maybe_sparse_conv1d_declines_an_oversized_kernel(self, monkeypatch):
+        monkeypatch.setattr(flexgemm_ops_module, "sparse_conv1d_enabled", lambda: True)
+        monkeypatch.setattr(flexgemm_ops_module, "available", lambda: True)
+        x = torch.zeros(1, 1, 4096)
+        x[0, 0, ::16] = 1.0
+        assert flexgemm_ops_module.maybe_sparse_conv1d(
+            x, torch.ones(1, 1, 65), None, padding=(32,)) is None
+
+    def test_native_wrappers_return_none_instead_of_asserting(self, monkeypatch):
+        """A caller reaching for the native path directly gets this module's
+        documented "None when unsupported" contract, not an AssertionError."""
+        monkeypatch.setattr(flexgemm_ops_module, "available", lambda: True)
+        feats = torch.randn(4, 1)
+        coords = torch.zeros(4, 3, dtype=torch.int32)
+        shape = torch.Size((1, 1, 16, 16))
+        weight = torch.randn(1, 1, 17, 17)
+
+        assert flexgemm_ops_module.sparse_conv2d_native(
+            feats, coords, shape, weight) is None
+        assert flexgemm_ops_module.sparse_submanifold_conv2d_native(
+            feats, coords, shape, weight) is None
+
+    def test_an_assertion_from_flexgemm_is_caught_not_propagated(self, monkeypatch):
+        """The backstop: even for a kernel that passes the volume check, a
+        bare assert from anywhere inside FlexGEMM must degrade to None rather
+        than reach the application. AssertionError is how that library
+        reports unsupported configurations generally."""
+        monkeypatch.setattr(flexgemm_ops_module, "available", lambda: True)
+
+        def boom(*args, **kwargs):
+            raise AssertionError("some other FlexGEMM limitation")
+
+        monkeypatch.setattr(flexgemm_ops_module, "_sparse_conv3d", boom)
+        result = flexgemm_ops_module.sparse_conv2d_native(
+            torch.randn(4, 1), torch.zeros(4, 3, dtype=torch.int32),
+            torch.Size((1, 1, 16, 16)), torch.randn(1, 1, 3, 3))
+        assert result is None
+
+    def test_patched_conv2d_survives_the_reported_call(self, monkeypatch):
+        """End to end on the shape from the traceback: F.conv2d with the
+        monkeypatch installed must return the dense result, not raise."""
+        monkeypatch.setattr(flexgemm_ops_module, "sparse_conv2d_enabled", lambda: True)
+        monkeypatch.setattr(flexgemm_ops_module, "available", lambda: True)
+        x = self._sparse_input()
+        weight = torch.ones(1, 1, 17, 17)
+        out = flexgemm_ops_module.maybe_sparse_conv2d(x, weight, None, padding=(8, 8))
+        assert out is None
+        torch.testing.assert_close(
+            F.conv2d(x, weight, padding=8), torch.conv2d(x, weight, padding=8))

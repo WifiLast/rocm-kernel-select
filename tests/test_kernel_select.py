@@ -411,3 +411,169 @@ class TestVerifyBarVersioning:
         assert kernel_select._winners.get(key) == "stock"
         kernel_select._winners.clear()
         kernel_select._bad_candidates.clear()
+
+
+class TestOomIsNotACorrectnessVerdict:
+    """An out-of-memory failure inside the verification step used to be
+    laundered into a permanent, disk-persisted "this kernel is numerically
+    wrong" blacklist entry.
+
+    The chain: _verify upcast BOTH outputs to fp32 with .float(), so
+    verifying a 2,000,000x1024 fp16 linear asked for 8.19 GB twice. On a
+    24 GB card already holding a 23 GB model that OOMs;
+    torch.OutOfMemoryError is a RuntimeError SUBCLASS, so _verify's
+    except-clause caught it and returned False; _contest read False as
+    "disagrees" and blacklisted the candidate forever. Every `linear` entry
+    in the shipped blacklist was of exactly that kind -- M from 174593 to
+    2000000, i.e. precisely the shapes whose fp32 copies are gigabytes.
+    """
+
+    def _oom(self):
+        cls = getattr(torch, "OutOfMemoryError", None)
+        if isinstance(cls, type):
+            return cls("CUDA out of memory. Tried to allocate 8.19 GiB")
+        return RuntimeError("CUDA out of memory. Tried to allocate 8.19 GiB")
+
+    def test_oom_is_recognised_however_torch_spells_it(self):
+        assert kernel_select._is_oom(self._oom())
+        assert kernel_select._is_oom(RuntimeError("HIP out of memory"))
+        assert not kernel_select._is_oom(RuntimeError("invalid configuration argument"))
+        assert not kernel_select._is_oom(TypeError("bad dtype"))
+
+    def test_verify_returns_none_not_false_on_oom(self, monkeypatch):
+        """None means INDETERMINATE. False would be a verdict, and a verdict
+        is what gets written to the permanent blacklist."""
+        def boom(*args, **kwargs):
+            raise self._oom()
+
+        monkeypatch.setattr(torch, "allclose", boom)
+        a = torch.ones(8, 4)
+        assert kernel_select._verify(a, a.clone()) is None
+
+    def test_verify_still_returns_false_for_a_real_mismatch(self):
+        a = torch.zeros(8, 4)
+        b = torch.ones(8, 4)
+        assert kernel_select._verify(a, b) is False
+
+    def test_verify_still_returns_true_for_agreement(self):
+        a = torch.randn(8, 4)
+        assert kernel_select._verify(a, a.clone()) is True
+
+    def test_verify_returns_false_for_a_shape_mismatch(self):
+        """Still a verdict about the candidate, not a resource problem."""
+        assert kernel_select._verify(torch.zeros(8, 4), torch.zeros(8, 5)) is False
+
+    def test_verify_never_upcasts_the_whole_tensor(self, monkeypatch):
+        """The actual fix: peak comparison memory must be bounded by the
+        chunk size, not by the output size. Recorded by watching how large
+        each .float() the comparison performs actually is."""
+        seen = []
+        original = torch.Tensor.float
+
+        def spy(self, *args, **kwargs):
+            seen.append(self.numel())
+            return original(self, *args, **kwargs)
+
+        monkeypatch.setattr(torch.Tensor, "float", spy)
+        rows = 4 * (kernel_select._VERIFY_CHUNK_ELEMENTS // 16) + 7
+        a = torch.zeros(rows, 16)
+        kernel_select._verify(a, a.clone())
+
+        assert seen, "the comparison should have upcast something"
+        assert max(seen) <= kernel_select._VERIFY_CHUNK_ELEMENTS, (
+            f"upcast {max(seen)} elements at once, chunk limit is "
+            f"{kernel_select._VERIFY_CHUNK_ELEMENTS}"
+        )
+        assert max(seen) < a.numel(), "a whole-tensor upcast is the bug being fixed"
+
+    def test_chunked_comparison_still_catches_a_mismatch_in_the_last_chunk(self):
+        """Chunking is exact, not a sample -- an element wrong anywhere must
+        still fail, including in a final short chunk."""
+        rows = 3 * (kernel_select._VERIFY_CHUNK_ELEMENTS // 16) + 5
+        a = torch.zeros(rows, 16)
+        b = a.clone()
+        b[-1, -1] = 1e9
+        assert kernel_select._verify(a, b) is False
+
+    def test_contest_does_not_blacklist_on_an_oom(self, monkeypatch):
+        """The whole point. An OOM during verification must leave the
+        blacklist untouched -- an entry there is permanent and persisted."""
+        key = ("linear", torch.float16, 2000000, (1024, 1024), False)
+        monkeypatch.setattr(kernel_select, "_winners", {})
+        monkeypatch.setattr(kernel_select, "_bad_candidates", {})
+        monkeypatch.setattr(kernel_select, "_save_disk_cache", lambda: None)
+        monkeypatch.setattr(kernel_select, "_time", lambda fn: 1.0)
+        monkeypatch.setattr(kernel_select, "_VERIFY_ENABLED", True)
+        monkeypatch.setattr(kernel_select, "_verify", lambda *a, **k: None)
+
+        fast = torch.ones(4, 4)
+        reference = torch.zeros(4, 4)
+        with pytest.warns(UserWarning, match="ran out of memory verifying"):
+            out = kernel_select._contest(
+                key, [("hipblaslt", lambda: fast), ("stock", lambda: reference)])
+
+        assert out is reference, "the reference is correct by convention -- use it"
+        assert kernel_select._bad_candidates == {}, "no judgement may be recorded"
+        assert kernel_select._winners == {}, "nor a winner chosen under pressure"
+
+    def test_contest_still_blacklists_a_genuine_mismatch(self, monkeypatch):
+        """The guard must not disarm the real correctness check."""
+        key = ("linear", torch.float16, 128, (64, 64), False)
+        monkeypatch.setattr(kernel_select, "_winners", {})
+        monkeypatch.setattr(kernel_select, "_bad_candidates", {})
+        monkeypatch.setattr(kernel_select, "_save_disk_cache", lambda: None)
+        monkeypatch.setattr(kernel_select, "_time", lambda fn: 1.0)
+        monkeypatch.setattr(kernel_select, "_VERIFY_ENABLED", True)
+
+        wrong = torch.ones(4, 4)
+        reference = torch.zeros(4, 4)
+        with pytest.warns(UserWarning, match="didn't match"):
+            out = kernel_select._contest(
+                key, [("hipblaslt", lambda: wrong), ("stock", lambda: reference)])
+
+        assert out is reference
+        assert "hipblaslt" in kernel_select._bad_candidates[key]
+
+    def test_a_candidate_oom_does_not_escape_the_contest(self, monkeypatch):
+        """An OOM raised by a candidate thunk used to propagate out and kill
+        the application, even though the reference could still serve."""
+        key = ("linear", torch.float16, 2000000, (1024, 1024), False)
+        monkeypatch.setattr(kernel_select, "_winners", {})
+        monkeypatch.setattr(kernel_select, "_bad_candidates", {})
+        monkeypatch.setattr(kernel_select, "_save_disk_cache", lambda: None)
+        monkeypatch.setattr(kernel_select, "_time", lambda fn: 1.0)
+        monkeypatch.setattr(kernel_select, "_VERIFY_ENABLED", True)
+
+        reference = torch.zeros(4, 4)
+
+        def oom_thunk():
+            raise self._oom()
+
+        out = kernel_select._contest(
+            key, [("hipblaslt", oom_thunk), ("stock", lambda: reference)])
+        assert out is reference
+        assert kernel_select._bad_candidates == {}
+
+    def test_a_non_oom_runtime_error_from_a_candidate_still_propagates(self, monkeypatch):
+        """The guard is for memory pressure only -- a genuine bug in a
+        candidate must not be swallowed into a silent fallback."""
+        key = ("linear", torch.float16, 128, (64, 64), False)
+        monkeypatch.setattr(kernel_select, "_winners", {})
+        monkeypatch.setattr(kernel_select, "_bad_candidates", {})
+        monkeypatch.setattr(kernel_select, "_save_disk_cache", lambda: None)
+        monkeypatch.setattr(kernel_select, "_time", lambda fn: 1.0)
+        monkeypatch.setattr(kernel_select, "_VERIFY_ENABLED", True)
+
+        def broken():
+            raise RuntimeError("invalid configuration argument")
+
+        with pytest.raises(RuntimeError, match="invalid configuration"):
+            kernel_select._contest(
+                key, [("hipblaslt", broken), ("stock", lambda: torch.zeros(4, 4))])
+
+    def test_the_bar_version_bump_drops_the_old_oom_written_entries(self):
+        """Entries written at bar version 2 were judgements made by a
+        comparison that could OOM into a False, so they are not evidence
+        under the current bar. The module's existing versioning is what
+        retires them."""
+        assert kernel_select._VERIFY_BAR_VERSION >= 3

@@ -187,6 +187,62 @@ def sparse_conv3d_enabled() -> bool:
     return _SPARSE_CONV3D_ENABLED
 
 
+# ---------------------------------------------------------------------------
+# FlexGEMM's kernel-volume ceiling.
+#
+# The default spconv algorithm (MASKED_IMPLICIT_GEMM_SPLITK, see
+# third_party/FlexGEMM/flex_gemm/ops/spconv/__init__.py) encodes which of a
+# kernel's taps each neighbour contributes to as a bitmask in ONE uint32, so a
+# kernel with more than 32 elements has no representation. FlexGEMM enforces
+# that with a bare `assert` (sparse_conv3d.py:177, submanifold_conv3d.py:84),
+# not an exception type a caller can tell apart from a bug -- and AssertionError
+# is not in the "unsupported shape, fall back to dense" except-tuples this
+# module uses everywhere else, so it escaped every layer and killed the calling
+# application. Observed from Hunyuan3D-2's mesh_render.back_project(), which
+# convolves a mask with a (2/512 * resolution * 2 + 1)-square box kernel: 17x17
+# = 289 taps at 2048px, 9x9 = 81 at 1024px. Only a resolution of 512 or below
+# stays inside 32.
+#
+# Volume is checked here rather than left to FlexGEMM for two reasons: the
+# maybe_* switches can then decline BEFORE paying for the dense->sparse
+# conversion, and the lower-level wrappers keep this module's documented
+# "None when unsupported" contract instead of raising. AssertionError is also
+# added to those wrappers' except-tuples as a backstop, since a bare assert is
+# how FlexGEMM reports unsupported configurations generally -- the same reason
+# every aiter-backed wrapper in this package already catches it.
+# ---------------------------------------------------------------------------
+
+_FLEX_GEMM_MAX_KERNEL_VOLUME = 32
+
+
+def _kernel_volume_supported(*kernel_dims) -> bool:
+    """True when a kernel with these spatial extents fits FlexGEMM's uint32
+    tap mask. Pass the kernel's spatial dimensions only -- not Co/Ci."""
+    volume = 1
+    for dim in kernel_dims:
+        volume *= int(dim)
+    return volume <= _FLEX_GEMM_MAX_KERNEL_VOLUME
+
+
+def _weight_kernel_volume_supported(weight, *dim_indices) -> bool:
+    """_kernel_volume_supported for a weight tensor's spatial dims, reading
+    them at `dim_indices` (which differ between FlexGEMM's own
+    [Co,Kw,Kh,Kd,Ci] layout and torch's [Co,Ci,...] one).
+
+    PERMISSIVE when the dims cannot be read at all -- a `weight` that is not
+    a tensor, or has too few dims. The guard exists to stop an
+    AssertionError escaping this module; a guard that raised AttributeError
+    on an odd argument would just be the same bug wearing a different
+    exception. Anything it waves through still meets FlexGEMM's own assert,
+    which the except-clauses below now catch.
+    """
+    try:
+        dims = [weight.shape[i] for i in dim_indices]
+    except (AttributeError, IndexError, TypeError):
+        return True
+    return _kernel_volume_supported(*dims)
+
+
 def sparse_conv3d(feats: torch.Tensor, coords: torch.Tensor, shape: torch.Size,
                    weight: torch.Tensor, bias: Optional[torch.Tensor] = None,
                    stride: Tuple[int, int, int] = (1, 1, 1),
@@ -201,12 +257,16 @@ def sparse_conv3d(feats: torch.Tensor, coords: torch.Tensor, shape: torch.Size,
     the neighbor map every call, which is what this one-shot wrapper does."""
     if not available():
         return None
+    # weight is FlexGEMM's own [Co,Kw,Kh,Kd,Ci] layout here, so the spatial
+    # extents are dims 1..3.
+    if not _weight_kernel_volume_supported(weight, 1, 2, 3):
+        return None
     try:
         out_feats, out_coords, _cache = _sparse_conv3d(
             feats, coords, shape, weight, bias=bias,
             stride=stride, padding=padding, dilation=dilation)
         return out_feats, out_coords
-    except (RuntimeError, TypeError):
+    except (RuntimeError, TypeError, AssertionError):
         return None
 
 
@@ -221,11 +281,13 @@ def sparse_submanifold_conv3d(feats: torch.Tensor, coords: torch.Tensor, shape: 
     if unavailable/unsupported."""
     if not available():
         return None
+    if not _weight_kernel_volume_supported(weight, 1, 2, 3):
+        return None
     try:
         out_feats, _cache = _sparse_submanifold_conv3d(
             feats, coords, shape, weight, bias=bias, dilation=dilation)
         return out_feats
-    except (RuntimeError, TypeError):
+    except (RuntimeError, TypeError, AssertionError):
         return None
 
 
@@ -252,7 +314,7 @@ def encode_seq(coords: torch.Tensor, shape: torch.Size,
         return None
     try:
         return _encode_seq(coords, shape, mode=mode)
-    except (RuntimeError, TypeError, ValueError):
+    except (RuntimeError, TypeError, ValueError, AssertionError):
         return None
 
 
@@ -264,7 +326,7 @@ def decode_seq(code: torch.Tensor, shape: torch.Size,
         return None
     try:
         return _decode_seq(code, shape, mode=mode)
-    except (RuntimeError, TypeError, ValueError):
+    except (RuntimeError, TypeError, ValueError, AssertionError):
         return None
 
 
@@ -587,7 +649,7 @@ def sparse_conv3d_from_dense(input: torch.Tensor, weight: torch.Tensor,
             out_bdhwc[oc[:, 0], oc[:, 1], oc[:, 2], oc[:, 3]] = out_feats.to(out_dtype)
 
         return out_bdhwc.permute(0, 4, 1, 2, 3).contiguous().to(input.dtype)
-    except (RuntimeError, TypeError, ValueError, IndexError):
+    except (RuntimeError, TypeError, ValueError, IndexError, AssertionError):
         return None
 
 
@@ -627,6 +689,10 @@ def maybe_sparse_conv3d(input: torch.Tensor, weight: torch.Tensor,
     if not (sparse_conv3d_enabled() and available()):
         return None
     if input.dim() != 5 or weight.dim() != 5:
+        return None
+    # Declined here, not inside sparse_conv3d_from_dense, so an oversized
+    # kernel costs nothing: the dense->sparse conversion below is O(B*C*D*H*W).
+    if not _kernel_volume_supported(weight.shape[2], weight.shape[3], weight.shape[4]):
         return None
     min_pos = _SPARSE_CONV3D_MIN_POSITIONS if min_positions is None else min_positions
     if _n_spatial_positions(input) < min_pos:
@@ -991,6 +1057,9 @@ def sparse_submanifold_conv2d_native(feats: torch.Tensor, coords: torch.Tensor, 
     kh, kw = weight.shape[2], weight.shape[3]
     if kh % 2 == 0 or kw % 2 == 0:
         return None
+    # The depth-1 lift below makes the 3D volume kh * kw * 1.
+    if not _kernel_volume_supported(kh, kw):
+        return None
     try:
         b, c_in, h, w = shape
         dh, dw = dilation
@@ -998,7 +1067,7 @@ def sparse_submanifold_conv2d_native(feats: torch.Tensor, coords: torch.Tensor, 
             feats, _lift_coords_2d_to_3d(coords), torch.Size((b, c_in, h, w, 1)),
             _lift_weight_2d_to_3d(weight), bias=bias, dilation=(dh, dw, 1))
         return out_feats
-    except (RuntimeError, TypeError, ValueError):
+    except (RuntimeError, TypeError, ValueError, AssertionError):
         return None
 
 
@@ -1015,6 +1084,8 @@ def sparse_conv2d_native(feats: torch.Tensor, coords: torch.Tensor, shape: torch
     if not available():
         return None
     c_out = weight.shape[0]
+    if not _kernel_volume_supported(weight.shape[2], weight.shape[3]):
+        return None
     if feats.shape[0] == 0:
         return (torch.zeros(0, c_out, dtype=feats.dtype, device=feats.device),
                 torch.zeros(0, 3, dtype=torch.int32, device=feats.device))
@@ -1028,7 +1099,7 @@ def sparse_conv2d_native(feats: torch.Tensor, coords: torch.Tensor, shape: torch
             _lift_weight_2d_to_3d(weight), bias=bias,
             stride=(sh, sw, 1), padding=(ph, pw, 0), dilation=(dh, dw, 1))
         return out_feats, out_coords4[:, :3].to(torch.int32)
-    except (RuntimeError, TypeError, ValueError):
+    except (RuntimeError, TypeError, ValueError, AssertionError):
         return None
 
 
@@ -1131,7 +1202,7 @@ def sparse_conv2d_from_dense(input: torch.Tensor, weight: torch.Tensor,
             out_bhwc[oc[:, 0], oc[:, 1], oc[:, 2]] = out_feats.to(out_dtype)
 
         return out_bhwc.permute(0, 3, 1, 2).contiguous().to(input.dtype)
-    except (RuntimeError, TypeError, ValueError, IndexError):
+    except (RuntimeError, TypeError, ValueError, IndexError, AssertionError):
         return None
 
 
@@ -1181,6 +1252,9 @@ def maybe_sparse_conv2d(input: torch.Tensor, weight: torch.Tensor,
     if not available():  # see the docstring's available()-gate section
         return None
     if input.dim() != 4 or weight.dim() != 4:
+        return None
+    # See maybe_sparse_conv3d: declined before the O(B*C*H*W) conversion.
+    if not _kernel_volume_supported(weight.shape[2], weight.shape[3]):
         return None
     min_pos = _SPARSE_CONV2D_MIN_POSITIONS if min_positions is None else min_positions
     if _n_spatial_positions(input) < min_pos:
@@ -1382,7 +1456,7 @@ def sparse_conv1d_from_dense(input: torch.Tensor, weight: torch.Tensor,
             out_blc[oc[:, 0], oc[:, 1]] = out_feats.to(out_dtype)
 
         return out_blc.permute(0, 2, 1).contiguous().to(input.dtype)
-    except (RuntimeError, TypeError, ValueError, IndexError):
+    except (RuntimeError, TypeError, ValueError, IndexError, AssertionError):
         return None
 
 
@@ -1416,6 +1490,10 @@ def maybe_sparse_conv1d(input: torch.Tensor, weight: torch.Tensor,
     if not available():  # see maybe_sparse_conv2d's docstring
         return None
     if input.dim() != 3 or weight.dim() != 3:
+        return None
+    # A 1D kernel lifts to a 3D volume of k * 1 * 1, so the ceiling bites at
+    # k > 32 -- reachable for the long depthwise kernels this path targets.
+    if not _kernel_volume_supported(weight.shape[2]):
         return None
     min_pos = _SPARSE_CONV1D_MIN_POSITIONS if min_positions is None else min_positions
     if _n_spatial_positions(input) < min_pos:

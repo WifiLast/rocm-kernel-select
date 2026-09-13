@@ -213,6 +213,19 @@ def _env_flag(name: str, default: str = "0") -> bool:
 _HAS_INFERENCE_MODE = hasattr(torch, "is_inference_mode_enabled")
 
 
+# Duplicated from amd_tuned_torch._dispatch for the same reason _grad_safe
+# below is: __init__.py imports THIS module, so importing back would be
+# circular. Keep the two in sync -- _dispatch._PLAIN_TENSOR_TYPES carries the
+# full explanation of why a Tensor subclass must never reach these kernels.
+_PLAIN_TENSOR_TYPES = (torch.Tensor, torch.nn.Parameter)
+
+
+def _is_plain_tensor(t: Any) -> bool:
+    """True for a dense tensor FlexGEMM's kernels can read. Non-tensors pass
+    (bias is legitimately None), Tensor subclasses do not."""
+    return not isinstance(t, torch.Tensor) or type(t) in _PLAIN_TENSOR_TYPES
+
+
 def _grad_safe(*tensors: Any) -> bool:
     """Same semantics as amd_tuned_torch.__init__._grad_safe -- duplicated
     rather than imported (this module is imported BY
@@ -407,6 +420,11 @@ def _try_sparse_conv1d_fastpath(
     conv path has no backward pass at all -- see _grad_safe's own
     docstring above for exactly what silently breaks without this check."""
     if groups != 1 or not _grad_safe(input, weight, bias):
+        return None
+    # Tensor SUBCLASSES decline here too: FlexGEMM's kernels read dense
+    # storage, and handing one a quantized tensor ends in an illegal memory
+    # access rather than a catchable exception (see _dispatch._usable).
+    if not all(_is_plain_tensor(t) for t in (input, weight, bias)):
         return None
     return flexgemm_ops.maybe_sparse_conv1d(
         input, weight, bias, stride=(_scalar(stride),), padding=(_scalar(padding),),
