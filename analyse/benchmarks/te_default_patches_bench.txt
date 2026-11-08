@@ -1,0 +1,14 @@
+AdamW.step  unet float32                     stock    9.924 ms  patched    3.090 ms   3.21x
+AdamW(fused).step  unet float32              stock    3.444 ms  patched    3.434 ms   1.00x
+clip_grad_norm_  unet float32                stock    2.483 ms  patched    1.923 ms   1.29x
+AdamW.step  unet bfloat16                    stock    5.448 ms  patched    2.628 ms   2.07x
+AdamW(fused).step  unet bfloat16             stock    1.853 ms  patched    1.859 ms   1.00x
+clip_grad_norm_  unet bfloat16               stock    2.144 ms  patched    1.261 ms   1.70x
+AdamW.step  llm float32                      stock   20.662 ms  patched    6.278 ms   3.29x
+AdamW(fused).step  llm float32               stock    6.610 ms  patched    6.609 ms   1.00x
+clip_grad_norm_  llm float32                 stock    3.113 ms  patched    3.115 ms   1.00x
+AdamW.step  llm bfloat16                     stock   10.104 ms  patched    3.172 ms   3.18x
+AdamW(fused).step  llm bfloat16              stock    3.457 ms  patched    3.422 ms   1.01x
+clip_grad_norm_  llm bfloat16                stock    1.687 ms  patched    1.674 ms   1.01x
+nn.Dropout(0.5) fwd+bwd 8192x4096 float16    stock    0.445 ms  patched    0.361 ms   1.23x
+nn.Dropout(0.5) fwd+bwd 8192x4096 bfloat16   stock    0.441 ms  patched    0.356 ms   1.24x

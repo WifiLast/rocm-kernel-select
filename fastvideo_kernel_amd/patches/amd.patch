@@ -1,0 +1,221 @@
+diff -ruN -x __pycache__ -x '*.egg-info' upstream_snapshot/python/fastvideo_kernel/_amd.py python/fastvideo_kernel/_amd.py
+--- upstream_snapshot/python/fastvideo_kernel/_amd.py	1970-01-01 01:00:00.000000000 +0100
++++ python/fastvideo_kernel/_amd.py	2026-10-26 00:35:28.202517834 +0100
+@@ -0,0 +1,107 @@
++"""ROCm side of fastvideo-kernel-amd.
++
++Upstream builds its compiled ops (turbodiffusion int8 GEMM/quant, TK and
++Blackwell attention) from CUTLASS/CuTe/PTX, none of which compiles for HIP,
++so on ROCm only the Triton paths exist. This module supplies the missing
++pieces for AMD GPUs:
++
++* the block-scaled int8 quant / GEMM kernels, loaded from the sibling
++  amd_tuned_torch source tree by file path (only that one self-contained file: importing the
++  amd_tuned_torch package would also patch torch globally, and the copy in
++  py310_amd's site-packages is older than the source tree);
++* the RDNA3 (gfx11) autotune config sets for the attention kernels.
++
++FASTVIDEO_AMD_INT8_OPS=<path> points at another blockscaled_int8_ops.py,
++FASTVIDEO_AMD_INT8=0 disables the int8 kernels (calls then fail like upstream),
++FASTVIDEO_AMD_FULL_AUTOTUNE=1 restores upstream's full autotune search.
++"""
++from __future__ import annotations
++
++import functools
++import importlib.util
++import os
++from pathlib import Path
++
++import torch
++
++# this package lives in amd_tools/source/cmp_ext_turing/fastvideo_kernel_amd, next to amd_tuned_torch
++DEFAULT_INT8_OPS = Path(__file__).resolve().parents[3] / "amd_tuned_torch" / "blockscaled_int8_ops.py"
++
++
++def is_rocm() -> bool:
++    return torch.version.hip is not None
++
++
++@functools.lru_cache(maxsize=1)
++def gfx_arch() -> str:
++    """'gfx1100' etc., '' when there is no ROCm device."""
++    if not is_rocm() or not torch.cuda.is_available():
++        return ""
++    return torch.cuda.get_device_properties(0).gcnArchName.split(":")[0]
++
++
++def is_rdna() -> bool:
++    """RDNA (gfx10/11/12): wave32, WMMA, no MFMA -- needs its own tile configs."""
++    arch = gfx_arch()
++    return arch.startswith(("gfx10", "gfx11", "gfx12"))
++
++
++def full_autotune() -> bool:
++    return os.environ.get("FASTVIDEO_AMD_FULL_AUTOTUNE", "0") == "1"
++
++
++@functools.lru_cache(maxsize=1)
++def int8_ops():
++    """The amd_tuned_torch blockscaled_int8_ops module, or None."""
++    if not is_rocm() or os.environ.get("FASTVIDEO_AMD_INT8", "1") == "0":
++        return None
++    path = Path(os.environ.get("FASTVIDEO_AMD_INT8_OPS", DEFAULT_INT8_OPS)).expanduser()
++    if path.is_file():
++        spec = importlib.util.spec_from_file_location("fastvideo_kernel._amd_blockscaled_int8", path)
++        mod = importlib.util.module_from_spec(spec)
++        spec.loader.exec_module(mod)
++        return mod
++    try:  # an installed amd_tuned_torch new enough to carry the module
++        from amd_tuned_torch import blockscaled_int8_ops as mod  # type: ignore
++        return mod
++    except Exception:
++        return None
++
++
++def quant_rocm(x, out=None, out_s=None):
++    """Same contract as upstream quant_cuda(x, None, None) -> (q, s)."""
++    if x.dtype not in (torch.float16, torch.bfloat16):
++        raise RuntimeError("Unsupported input data type for quant_cuda (int8 quantization).")
++    q, s = int8_ops().int8_quant(x)
++    if out is not None:
++        out.copy_(q)
++        out_s.copy_(s)
++        return out, out_s
++    return q, s
++
++
++def gemm_rocm(a_q, a_s, b_q, b_s, out):
++    """Same contract as upstream gemm_cuda: writes deq(a) @ deq(b)^T into out."""
++    int8_ops().int8_gemm(a_q, a_s, b_q, b_s, out=out)
++    return out
++
++
++# gfx1100 sweep (tools/bench_gfx11.py --sweep, RX 7900 XTX, 2026-10-26): only these
++# configs ever won; num_stages >= 4 (w8) / >= 5 don't fit the 64 KB LDS and fail to compile.
++# Autotuning upstream's full lists costs minutes per new shape (STA: 36 configs).
++_RDNA_VSA_FWD = {(2, 4), (3, 4)}  # (num_stages, num_warps), BLOCK_M = BLOCK_N = 64 fixed
++_RDNA_STA = {(64, 32, 4, 1), (128, 32, 8, 1), (64, 64, 4, 1), (128, 64, 8, 1)}  # (BLOCK_Q, BLOCK_KV, warps, stages)
++
++
++def vsa_fwd_configs(configs):
++    if not is_rdna() or full_autotune():
++        return configs
++    return [c for c in configs if (c.num_stages, c.num_warps) in _RDNA_VSA_FWD] or configs
++
++
++def sta_configs(configs):
++    if not is_rdna() or full_autotune():
++        return configs
++    keep = [c for c in configs
++            if (c.kwargs["BLOCK_Q"], c.kwargs["BLOCK_KV"], c.num_warps, c.num_stages) in _RDNA_STA]
++    return keep or configs
+diff -ruN -x __pycache__ -x '*.egg-info' upstream_snapshot/python/fastvideo_kernel/triton_kernels/block_sparse_attn_triton.py python/fastvideo_kernel/triton_kernels/block_sparse_attn_triton.py
+--- upstream_snapshot/python/fastvideo_kernel/triton_kernels/block_sparse_attn_triton.py	2026-10-25 23:31:27.110541962 +0100
++++ python/fastvideo_kernel/triton_kernels/block_sparse_attn_triton.py	2026-10-26 00:24:21.597054365 +0100
+@@ -34,6 +34,11 @@
+     for w in [4, 8]\
+ ]
+ 
++# AMD RDNA: keep only the configs that won the gfx1100 sweep (see fastvideo_kernel._amd)
++from fastvideo_kernel import _amd  # noqa: E402
++
++configs = _amd.vsa_fwd_configs(configs)
++
+ 
+ # ──────────────────────────── SPARSE ADDITION BEGIN ───────────────────────────
+ @triton.autotune(configs, key=["N_CTX_Q", "HEAD_DIM"])
+@@ -97,34 +102,17 @@
+     v_off = (b.to(tl.int64) * stride_vz + h.to(tl.int64) * stride_vh)
+     o_off = (b.to(tl.int64) * stride_oz + h.to(tl.int64) * stride_oh)
+ 
+-    Q_ptr = tl.make_block_ptr(base=Q + q_off,
+-                              shape=(N_CTX_Q, HEAD_DIM),
+-                              strides=(stride_qm, stride_qk),
+-                              offsets=(q_blk * BLOCK_M, 0),
+-                              block_shape=(BLOCK_M, HEAD_DIM),
+-                              order=(1, 0))
+-
+-    K_base = tl.make_block_ptr(base=K + k_off,
+-                               shape=(HEAD_DIM, N_CTX_KV),
+-                               strides=(stride_kk, stride_kn),
+-                               offsets=(0, 0),
+-                               block_shape=(HEAD_DIM, BLOCK_N),
+-                               order=(0, 1))
+-
+-    v_order: tl.constexpr = (0, 1) if V.dtype.element_ty == tl.float8e5 else (1, 0)
+-    V_base = tl.make_block_ptr(base=V + v_off,
+-                               shape=(N_CTX_KV, HEAD_DIM),
+-                               strides=(stride_vk, stride_vn),
+-                               offsets=(0, 0),
+-                               block_shape=(BLOCK_N, HEAD_DIM),
+-                               order=v_order)
+-
+-    O_ptr = tl.make_block_ptr(base=Out + o_off,
+-                              shape=(N_CTX_Q, HEAD_DIM),
+-                              strides=(stride_om, stride_on),
+-                              offsets=(q_blk * BLOCK_M, 0),
+-                              block_shape=(BLOCK_M, HEAD_DIM),
+-                              order=(1, 0))
++    # Plain pointer tiles instead of block pointers + advance: Triton 3.8
++    # (py310_amd's ROCm build) removed block pointers. None of them used
++    # boundary_check, so these are the same unmasked full-tile loads.
++    offs_d = tl.arange(0, HEAD_DIM)
++    offs_n = tl.arange(0, BLOCK_N)
++    Q_ptr = (Q + q_off + (q_blk * BLOCK_M + tl.arange(0, BLOCK_M))[:, None] * stride_qm
++             + offs_d[None, :] * stride_qk)
++    K_base = K + k_off + offs_d[:, None] * stride_kk + offs_n[None, :] * stride_kn  # [HEAD_DIM, BLOCK_N]
++    V_base = V + v_off + offs_n[:, None] * stride_vk + offs_d[None, :] * stride_vn  # [BLOCK_N, HEAD_DIM]
++    O_ptr = (Out + o_off + (q_blk * BLOCK_M + tl.arange(0, BLOCK_M))[:, None] * stride_om
++             + offs_d[None, :] * stride_on)
+ 
+     # ----- accumulators -----
+     offs_m = q_blk * BLOCK_M + tl.arange(0, BLOCK_M)
+@@ -138,8 +126,8 @@
+     for i in range(0, kv_blocks):
+         kv_idx = tl.load(kv_ptr + i).to(tl.int32)
+         block_size = tl.load(variable_block_sizes + kv_idx)
+-        K_ptr = tl.advance(K_base, (0, kv_idx * BLOCK_N))
+-        V_ptr = tl.advance(V_base, (kv_idx * BLOCK_N, 0))
++        K_ptr = K_base + (kv_idx * BLOCK_N).to(tl.int64) * stride_kn
++        V_ptr = V_base + (kv_idx * BLOCK_N).to(tl.int64) * stride_vk
+ 
+         k = tl.load(K_ptr)
+         qk = tl.dot(q, k)
+diff -ruN -x __pycache__ -x '*.egg-info' upstream_snapshot/python/fastvideo_kernel/triton_kernels/st_attn_triton.py python/fastvideo_kernel/triton_kernels/st_attn_triton.py
+--- upstream_snapshot/python/fastvideo_kernel/triton_kernels/st_attn_triton.py	2026-10-25 23:31:27.110541962 +0100
++++ python/fastvideo_kernel/triton_kernels/st_attn_triton.py	2026-10-26 00:24:21.597395889 +0100
+@@ -38,8 +38,9 @@
+ 
+ 
+ def get_hip_autotune_config():
+-    # cuda and hip can use differnt autotune configs
+-    return get_common_autotune_config()
++    # AMD RDNA: only the configs that won the gfx1100 sweep (see fastvideo_kernel._amd)
++    from fastvideo_kernel import _amd
++    return _amd.sta_configs(get_common_autotune_config())
+ 
+ 
+ def get_autotune_config():
+diff -ruN -x __pycache__ -x '*.egg-info' upstream_snapshot/python/fastvideo_kernel/turbodiffusion_ops.py python/fastvideo_kernel/turbodiffusion_ops.py
+--- upstream_snapshot/python/fastvideo_kernel/turbodiffusion_ops.py	2026-10-25 23:31:27.111010757 +0100
++++ python/fastvideo_kernel/turbodiffusion_ops.py	2026-10-25 23:31:50.002885565 +0100
+@@ -20,6 +20,13 @@
+     rms_norm_cuda = None
+     layer_norm_cuda = None
+ 
++# ROCm: the CUTLASS int8 kernels don't exist there, use the Triton ones from amd_tuned_torch
++if quant_cuda is None:
++    from fastvideo_kernel import _amd
++    if _amd.int8_ops() is not None:
++        quant_cuda = _amd.quant_rocm
++        gemm_cuda = _amd.gemm_rocm
++
+ 
+ def int8_quant(x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+     """
+diff -ruN -x __pycache__ -x '*.egg-info' upstream_snapshot/python/fastvideo_kernel/version.py python/fastvideo_kernel/version.py
+--- upstream_snapshot/python/fastvideo_kernel/version.py	2026-10-25 23:31:27.111010757 +0100
++++ python/fastvideo_kernel/version.py	2026-10-25 23:31:58.038881992 +0100
+@@ -1 +1 @@
+-__version__ = "0.3.5"
++__version__ = "0.3.5+amd"

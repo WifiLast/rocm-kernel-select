@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=61.0.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "fastvideo-kernel"
+# local version label: still satisfies fastvideo's "fastvideo-kernel==0.3.5" pin
+version = "0.3.5+amd"
+description = "FastVideo kernels for AMD ROCm (Triton paths + amd_tuned_torch int8 kernels)"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { file = "LICENSE" }
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Environment :: GPU",
+]
+# torch / triton deliberately not listed: the ROCm builds in the env must not be replaced
+dependencies = []
+
+[tool.setuptools]
+package-dir = { "" = "python" }
+
+[tool.setuptools.packages.find]
+where = ["python"]
+include = ["fastvideo_kernel*"]

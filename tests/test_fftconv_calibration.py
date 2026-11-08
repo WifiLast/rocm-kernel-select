@@ -162,3 +162,47 @@ class TestResetFlag:
 
         assert calibration_module.load() == {}
         assert not os.path.exists(calibration_module.calibration_path())
+
+
+class TestMinKernelWiring:
+    """_dispatch's _FFTCONV_CONV{2,3}D_MIN_KERNEL consult this calibration as
+    of the min_kernel sweep (tools/benchmark_fftconv_min_kernel.py). They
+    previously read os.environ directly with a hardcoded default, so a saved
+    min_kernel was silently ignored -- the file accepted the field, nothing
+    consumed it. These pin the precedence that fixed it:
+    explicit env var > measured calibration > hardcoded guess."""
+
+    def test_falls_back_to_hardcoded_when_uncalibrated(self, monkeypatch):
+        from amd_tuned_torch import _dispatch
+        monkeypatch.setattr(_dispatch, "_fftconv_calibration_data", {})
+        assert _dispatch._calibrated_fftconv_default("conv2d", "min_kernel", "25") == "25"
+        assert _dispatch._calibrated_fftconv_default("conv3d", "min_kernel", "5") == "5"
+
+    def test_uses_calibrated_value_when_present(self, monkeypatch):
+        from amd_tuned_torch import _dispatch
+        monkeypatch.setattr(_dispatch, "_fftconv_calibration_data",
+                            {"conv2d": {"min_kernel": 41}, "conv3d": {"min_kernel": 9}})
+        assert _dispatch._calibrated_fftconv_default("conv2d", "min_kernel", "25") == "41"
+        assert _dispatch._calibrated_fftconv_default("conv3d", "min_kernel", "5") == "9"
+
+    def test_one_dim_calibrated_does_not_affect_the_other(self, monkeypatch):
+        from amd_tuned_torch import _dispatch
+        monkeypatch.setattr(_dispatch, "_fftconv_calibration_data",
+                            {"conv3d": {"min_kernel": 9}})
+        assert _dispatch._calibrated_fftconv_default("conv2d", "min_kernel", "25") == "25"
+        assert _dispatch._calibrated_fftconv_default("conv3d", "min_kernel", "5") == "9"
+
+    def test_min_positions_and_min_kernel_are_independent(self, monkeypatch):
+        """Same dim, two fields: calibrating one must not shadow the other's
+        hardcoded fallback."""
+        from amd_tuned_torch import _dispatch
+        monkeypatch.setattr(_dispatch, "_fftconv_calibration_data",
+                            {"conv3d": {"min_positions": 1024}})
+        assert _dispatch._calibrated_fftconv_default("conv3d", "min_positions", "2048") == "1024"
+        assert _dispatch._calibrated_fftconv_default("conv3d", "min_kernel", "5") == "5"
+
+    def test_thresholds_are_positive_ints(self):
+        from amd_tuned_torch import _dispatch
+        for v in (_dispatch._FFTCONV_CONV2D_MIN_KERNEL,
+                  _dispatch._FFTCONV_CONV3D_MIN_KERNEL):
+            assert isinstance(v, int) and v >= 1

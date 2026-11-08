@@ -175,7 +175,7 @@ _SPARSE_CONV3D_ENABLED = _env_flag("AMD_TUNED_TORCH_SPARSE_CONV3D", default="1")
 # maybe_sparse_conv3d's max_occupancy argument, or globally via this env var.
 _SPARSE_CONV3D_MAX_OCCUPANCY = float(
     os.environ.get("AMD_TUNED_TORCH_SPARSE_CONV3D_MAX_OCCUPANCY",
-                    _calibrated_default("conv3d", "max_occupancy", "0.1")))
+                    _calibrated_default("conv3d", "max_occupancy", "0.3")))
 
 
 def sparse_conv3d_enabled() -> bool:

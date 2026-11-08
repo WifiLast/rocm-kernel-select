@@ -7,14 +7,10 @@ shape/dtype eligibility rules. None of that touches a kernel. This file is
 the other half: the kernels actually run and their results are compared
 against references written the slow, obvious way.
 
-NOT YET RUN ON REAL HARDWARE. TransformerEngine does not currently build for
-gfx1100 in this tree (both fused-attention backends are CDNA-only and get
-compiled out; see third_party/TransformerEngine's setup.py gating), and the
-installed wheel is built for gfx942/gfx950. Every test below skips until
-that changes. They are written against the binding signatures in
-transformer_engine/pytorch/csrc/extensions.h and the calling conventions TE's
-own FusedAdam/FusedSGD/softmax code uses, not against observed output -- so
-treat a first green run as the validation, not as a regression check.
+First run on the RX 7900 XTX 2026-11-06 against the vendored TE build
+(gfx1100, torch 2.15 rocm7.14): all green after two wrapper fixes this file
+now guards -- softmax backward aliasing grad_output, and swap_first_dims'
+keyword-only `out`. Timings: tools/bench_te_extra_ops.py.
 
 Run with:
 
@@ -206,6 +202,43 @@ def test_scaled_softmax_backward_matches_torch():
     torch.testing.assert_close(scores.grad, ref.grad, rtol=2e-2, atol=2e-3)
 
 
+@pytest.mark.parametrize("variant", ["no_mask", "padding", "upper_triang"])
+def test_softmax_backward_with_real_grad_and_no_aliasing(variant):
+    """Regression: TE's softmax backward kernels write dL/dx into grad_output
+    in place. With a contiguous, caller-owned grad (y.backward(g)) the wrapper
+    used to hand that buffer straight to TE, so g was overwritten and the
+    returned gradient was wrong by 1-5000x. A random upstream grad also makes
+    this non-trivial: with .sum().backward() the softmax grad is ~0 anyway."""
+    scale = 0.125
+    torch.manual_seed(0)
+    if variant == "upper_triang":
+        shape = (8, 128, 128)
+        mask = torch.ones(128, 128, device="cuda", dtype=torch.bool).triu(1)
+        fn = lambda t: te_extra_ops.upper_triang_causal_softmax(t, scale)
+    else:
+        shape = (2, 4, 128, 128)
+        mask = None
+        if variant == "padding":
+            mask = torch.zeros(2, 1, 128, 128, device="cuda", dtype=torch.bool)
+            mask[..., 100:] = True
+        fn = lambda t: te_extra_ops.scaled_softmax(t, mask, scale, variant)
+    x = (torch.randn(shape, device="cuda", dtype=torch.float16) * 3).requires_grad_()
+    g = torch.randn(shape, device="cuda", dtype=torch.float16)
+    g_before = g.clone()
+
+    fn(x).backward(g)
+
+    assert torch.equal(g, g_before), "the caller's grad tensor was modified"
+    x32 = x.detach().float().requires_grad_()
+    s = x32 * scale
+    if mask is not None:
+        s = s.masked_fill(mask, float("-inf"))
+    torch.softmax(s, dim=-1).backward(g.float())
+    ref = x32.grad
+    rel = ((x.grad.float() - ref).abs().max() / ref.abs().max()).item()
+    assert rel < 5e-3, f"grad rel err {rel:.2e} vs fp32 reference"
+
+
 def test_scaled_softmax_or_torch_falls_back_without_crashing():
     """sq == 1 is the decode shape the kernel asserts against -- the wrapper
     has to route it to torch rather than let AT_ASSERTM fire."""
@@ -337,6 +370,23 @@ def test_pad_and_unpad_rows_round_trip():
     back = torch.zeros_like(src)
     te_extra_ops.unpad_rows(padded, back, padded_rows, input_rows)
     torch.testing.assert_close(back, src)
+
+
+def test_swap_first_dims_as_first_te_call_does_not_segfault():
+    """Regression: swap_first_dims' binding releases the GIL, and as the first
+    TE call in a process TE's lazy init_extension() then imports Python
+    without it -> SIGSEGV. Needs a fresh interpreter: in this pytest process
+    some other TE call has always run first and hides it."""
+    import os, subprocess, sys, pathlib
+    code = ("import torch, amd_tuned_torch.te_extra_ops as tx\n"
+            "x = torch.randn(4, 6, 8, device='cuda', dtype=torch.float16)\n"
+            "assert torch.equal(tx.swap_first_dims(x), x.transpose(0, 1).contiguous())\n")
+    env = dict(os.environ, AMD_TUNED_TORCH_ENABLE_TE="1", AMD_TUNED_TORCH_AUTOPATCH="0")
+    root = str(pathlib.Path(__file__).resolve().parent.parent)
+    env["PYTHONPATH"] = root + os.pathsep + env.get("PYTHONPATH", "")
+    r = subprocess.run([sys.executable, "-c", code], env=env, cwd=root,
+                       capture_output=True, text=True, timeout=180)
+    assert r.returncode == 0, f"rc={r.returncode}\n{r.stderr[-2000:]}"
 
 
 def test_swap_first_dims_matches_transpose():

@@ -9,7 +9,20 @@ now routed through TransformerEngine's own fused attention (CK/AOTriton
 backends), which has its own test suite upstream
 (`source/TransformerEngine/tests/pytorch/attention`).
 
-No replacement hardware test has been written here yet. Anything added
+`test_flash_attn.py` now covers attention from the other direction:
+`third_party/flash-attention`'s Triton ROCm backend (aiter's kernels, since
+no `flash_attn_2_cuda` is built in this env) checked numerically against an
+unfused fp32 reference -- forward, backward, GQA/MQA, sliding window,
+varlen, and the `flash_attn_with_kvcache` decode step. It sets
+`TORCH_DISABLE_AMD_TUNED_TORCH=1` so the reference is stock PyTorch rather
+than this package's own kernels, and `TRITON_DEFAULT_BACKEND=amd` because
+this box has an NVIDIA card visible alongside the 7900 XTX. First run costs
+~5 min of Triton JIT; later runs ~50s. Run it on its own:
+```
+pytest tests_hardware/test_flash_attn.py -v
+```
+
+No replacement hardware test has been written here yet for the items below. Anything added
 should run against a real RX 7900 XTX with amd_tuned_torch's native extension built
 and TransformerEngine installed -- validate at minimum:
 

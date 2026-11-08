@@ -40,6 +40,7 @@ from . import rope_ops
 from . import fused_ce_ops
 from . import boft_ops
 from . import swiglu_ops
+from . import vram_management_ops
 
 _INT8_LINEAR_DTYPES = (torch.float16, torch.bfloat16, torch.float32)  # aiter quantizes from any of these
 
@@ -710,6 +711,50 @@ def fast_block_diag(input):
     return boft_ops.fast_block_diag(input)
 
 
+# Re-exports amd_tuned_torch.vram_management_ops's classes/function at the
+# package top level, same convention as fast_block_diag above -- there is no
+# torch.nn.functional op for "wrap this submodule for VRAM offload" to
+# monkeypatch, so a caller applies these directly to their own model. See
+# vram_management_ops's module docstring for what this is for and why it
+# needed no ROCm-specific adaptation (it's plain PyTorch, ported verbatim
+# from cosmos-predict2).
+AutoWrappedModule = vram_management_ops.AutoWrappedModule
+AutoWrappedLinear = vram_management_ops.AutoWrappedLinear
+
+
+def enable_vram_management(model, module_map, module_config, max_num_param=None, overflow_module_config=None):
+    """Walks `model` and replaces every submodule matching a key in
+    `module_map` (a {source_module_class: target_wrapper_class} dict, e.g.
+    {torch.nn.Linear: amd_tuned_torch.AutoWrappedLinear}) with
+    target_wrapper_class(module, **module_config), recursing into
+    non-matching children. `module_config` (and `overflow_module_config`,
+    used once the running parameter count exceeds `max_num_param`) are the
+    offload_dtype/offload_device/onload_dtype/onload_device/
+    computation_dtype/computation_device kwargs AutoWrappedModule/
+    AutoWrappedLinear take -- see their docstrings. Sets
+    model.vram_management_enabled = True when done; the wrapped submodules'
+    own .offload()/.onload() are what a training/inference loop calls
+    around each forward to actually move weights, this function only
+    installs the wrappers.
+
+    Typical use, to keep an RDNA3 card's VRAM budget under a DiT's full
+    weight set by offloading Linear layers to CPU between calls:
+
+        amd_tuned_torch.enable_vram_management(
+            model,
+            module_map={torch.nn.Linear: amd_tuned_torch.AutoWrappedLinear},
+            module_config=dict(
+                offload_dtype=torch.float16, offload_device="cpu",
+                onload_dtype=torch.float16, onload_device="cuda",
+                computation_dtype=torch.float16, computation_device="cuda",
+            ),
+        )
+    """
+    return vram_management_ops.enable_vram_management(
+        model, module_map, module_config, max_num_param, overflow_module_config
+    )
+
+
 def mla_decode(x, kv_cache, kv_len, q_proj_down_weight, q_proj_up_weight,
                 kv_proj_down_weight, kv_proj_up_weight, wo_weight,
                 n_heads, nope_dim, rope_dim, v_dim, rope_theta: float = 10000.0):
@@ -832,6 +877,7 @@ __all__ = [
     "enable_triton_kernels_rmsnorm", "disable_triton_kernels_rmsnorm",
     "_BOFT_ENABLED", "_boft_fallback",
     "enable_boft", "disable_boft", "is_boft_enabled", "fast_block_diag",
+    "AutoWrappedModule", "AutoWrappedLinear", "enable_vram_management",
     "mla_decode", "fused_add_rms_norm", "rotary_embedding",
     "compute_rope_cos_sin_cache", "fused_linear_cross_entropy", "bias_swiglu",
     "compute_smoothquant_scale", "set_smooth_scale", "is_int8_linear_enabled",

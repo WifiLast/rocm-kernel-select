@@ -46,22 +46,59 @@ amd_tuned_torch -- monkeypatches PyTorch's ROCm op dispatch on RX 7900 XTX
     the native HIP/C++ extension in src/main_rocm.cpp) -- neither aiter nor
     TransformerEngine cover GroupNorm (a diffusion-U-Net-specific op, not a
     transformer/LLM one), so this one stays genuinely hand-rolled.
-  - F.scaled_dot_product_attention, F.rms_norm, F.gelu
-    (approximate="tanh" only), F.silu (fp16/bf16 only) are routed to
-    TransformerEngine's ROCm-native bindings (amd_tuned_torch/te_ops.py) -- TE
-    already ships tuned CK/AOTriton fused attention and fused
-    RMSNorm/GELU/SiLU kernels for ROCm, so there's no reason to hand-roll
-    those. F.layer_norm is NOT auto-patched: TE's layernorm_fwd benchmarked
-    slower than stock for both fp16 (0.71x) and fp32 (0.61x), see
-    benchmark.json -- _patched_layer_norm remains available for manual use.
-    F.silu's fp32 case also benchmarked slower (0.80x, vs. fp16's 1.15x) and
-    is excluded from the patch, falling back to stock per-call. Attention
-    also fires for an explicit causal `attn_mask` tensor, not just
-    `is_causal=True` -- HF model code and dflash both build one for
-    KV-cache decoding instead of setting the flag -- but only when it
-    structurally matches TE's fused "causal_bottom_right" pattern (see
-    te_ops.is_bottom_right_causal_mask); every other mask shape (padding,
-    sliding-window, arbitrary) still falls back to stock.
+  - F.layer_norm, F.rms_norm and F.scaled_dot_product_attention are routed
+    to TransformerEngine's ROCm-native bindings (amd_tuned_torch/te_ops.py),
+    but only for the calls TE actually wins -- each patch declines per call
+    and falls back to stock otherwise. The rules, and the fwd+bwd
+    measurements behind them, live in the _TE_* constants block in
+    _dispatch.py; raw numbers in analyse/benchmarks/te_ops_bench.txt
+    (regenerate with tools/bench_te_ops.py). RE-SWEPT 2026-11-06 on torch
+    2.15.0.dev20260920+rocm7.14 (tools/sweep_te_thresholds.py,
+    tools/bench_te_routing_e2e.py): the norm rule is now a rows x hidden x
+    dtype table in _dispatch._te_norm_route (HIP kernel, or TE's Triton
+    RMSNorm at hidden >= 3072), and attention additionally needs
+    head_dim >= 128 (head_dim 64 lost 0.47-0.81x) while fp32 UNMASKED
+    attention at head_dim 128 now goes to TE (1.62-2.08x). The bullets
+    below are the original 2026-09 rocm7.2 measurements. In short:
+      * the norms go to TE only on training calls over tall inputs
+        (>= 16384 rows, i.e. tokens) whose hidden size is under 8192:
+        1.03x-2.55x there, but 0.60x-1.09x on shorter ones, 0.79x on a wide
+        hidden size, and a loss in inference, where stock wins almost
+        everywhere. AMD_TUNED_TORCH_TE_NORM_MIN_ROWS and
+        ..._TE_NORM_MAX_COLS retune the cutoffs.
+      * attention goes to TE only on training calls carrying an EXPLICIT
+        boolean causal mask whose score matrix (batch * heads * q_len *
+        kv_len) is at least 16.8M elements (1.37x-1.87x) -- the case where
+        torch.backends.cuda.can_use_flash_attention() returns False and
+        PyTorch drops to its slower mem-efficient backend. Below that the
+        work does not cover TE's fixed per-call cost (0.90x at half the
+        threshold, 0.18x on tiny shapes); the bar is work rather than
+        sequence length because the same S wins or loses depending on
+        batch and head count. With `is_causal=True` or no mask, PyTorch
+        keeps flash and beats TE (0.20x-1.07x), so those stay on stock.
+        The mask must
+        structurally match TE's "causal_bottom_right" pattern (see
+        te_ops.is_bottom_right_causal_mask) -- HF model code and dflash
+        both build one for KV-cache decoding instead of setting the flag;
+        padding/sliding-window/arbitrary masks fall back to stock.
+    F.gelu and F.silu are NOT auto-patched: TE measured 0.87x-0.99x fwd+bwd
+    and as low as 0.68x forward on both, with no shape where either wins --
+    they are bandwidth-bound elementwise ops with nothing left to fuse.
+    _patched_gelu/_patched_silu remain available, and
+    AMD_TUNED_TORCH_TE_ACTIVATIONS=1 installs them.
+    Under the same TE gate, three te_extra_ops kernels replace stock by
+    default (tools/bench_te_default_patches.py, end-to-end through the torch
+    API): torch.optim Adam/AdamW's default foreach step (2.1-3.3x;
+    fused=True stays stock), clip_grad_norm_/get_total_norm's total norm
+    (1.0-1.7x), and F.dropout/nn.Dropout when p*256 is an integer (1.23x
+    fwd+bwd, 8x smaller saved mask; other p would be biased by TE's 8-bit
+    threshold, so they stay stock). Opt out per op with
+    AMD_TUNED_TORCH_TE_ADAM=0 / _TE_GRAD_NORM=0 / _TE_DROPOUT=0. Softmax is
+    NOT patched: its win is fusing scale+mask, which F.softmax never sees.
+    RMSNorm training calls (>= 16384 rows, hidden 4096-8192) use TE's ROCm
+    Triton kernel instead of the hipified one (1.21-1.82x vs stock, and it
+    covers hidden 8192, which the hipified rule left on stock);
+    AMD_TUNED_TORCH_TE_RMS_TRITON=0 turns that off.
 
 amd_tuned_torch.aiter_ops.fused_silu_mul is a manually-callable helper (not
 auto-patched -- no stock F.* op matches its SwiGLU-style gate*up
@@ -295,6 +332,97 @@ this was written in to dlopen a real librocfft.so against -- see
 rocfft_ops.py's own module docstring for exactly what is and isn't
 checked without hardware.
 
+amd_tuned_torch.conv_fusion_ops fuses the elementwise work AROUND a
+convolution -- specifically GroupNorm+SiLU, which in SDXL's ResBlock runs
+BEFORE every conv -- into one Triton kernel. It does NOT fuse the
+convolution itself, and cannot: MIOpen's fusion API is the only route to
+conv+bias+activation on this stack, and PyTorch does not link it
+(libtorch_hip.so imports 76 MIOpen symbols and not one fusion symbol), so
+MIOPEN_DEBUG_CONV_CK_IGEMM_FWD_BIAS_ACTIV and its neighbours gate solvers
+nothing here can select. The prologue is where the time is anyway: on one
+SDXL 2048x1024 generation (2,648 convs, 229 TFLOP) GroupNorm+SiLU costs
+~17% of conv time against the epilogue's ~3-6%.
+
+Unlike every other tier here, this one installs at nn.Module level
+(replace_conv_blocks(model) swaps each nn.Sequential(GroupNorm, SiLU,
+Conv2d) for a fused module) rather than by patching a torch function --
+because a patched F.conv2d cannot fuse a prologue: by the time conv2d is
+called, GroupNorm and SiLU have already run and written to memory. Fusion
+needs to see more than one op. enable()/disable() therefore do NOT install
+it; the caller invokes replace_conv_blocks on a model they have built, and
+unfuse_conv_blocks reverses it with the same Parameter objects intact.
+
+It contests THREE candidates and the winner is decided by LAYOUT as much
+as shape: Composable Kernel's GroupNorm-with-SiLU (ck_norm_ops, already
+built by this package -- CK's DeviceNormalizationFwd takes a
+YElementwiseOperation epilogue and CK ships Silu, so nothing new had to be
+written), this module's own Triton kernel, and stock. CK wins every
+channels_last shape measured (1.12x-2.39x) and declines NCHW outright;
+the Triton kernel is the mirror image, a small win in NCHW and slower than
+stock in channels_last, so it declines that layout. The contest key
+therefore includes the memory format. BUT ON THIS gfx1100 THE CK PATH IS
+UNREACHABLE: getting tensors into channels_last means --opt-channelslast,
+which makes convolution 239x-753x slower here (measured; see
+conv_fusion_ops' docstring), and conv is ~95% of the work in these blocks.
+So the live candidates are the Triton kernel and stock, and CK stays in the
+contest only because a decline is free. PYTORCH_MIOPEN_SUGGEST_NHWC=1 does
+not change tensor layout -- it is a MIOpen kernel-selection hint, and the
+captured workload is 2864/2864 NCHW. THE END-TO-END BLOCK
+SPEEDUP IS NOT ESTABLISHED: a null A/B (the identical model on both sides)
+on this machine reports up to 0.55x, i.e. a +-45% noise floor that swamps
+the ~6% a block-level win would be, because the card sits at perf level
+"auto" and idles at 96MHz/0MHz. Pin clocks (rocm-smi --setperflevel high)
+before quoting any number from that module; what IS established is
+numerical correctness and that the contest picks per shape. Forward-only;
+falls back to stock whenever a gradient is live, and for training use
+liger_group_norm_ops instead, which has a real backward. Correctness is checked against stock on every shape
+(tests/test_conv_fusion_ops.py); the Triton reduction accumulates in fp32
+because a GroupNorm group at SDXL sizes is ~82K elements and a fp16 sum of
+squares overflows to inf long before it finishes. Default on when Triton
+and a GPU are present, AMD_TUNED_TORCH_CONV_FUSION=0 to disable. NOT
+validated on a full generation -- only per-block microbenchmarks.
+
+amd_tuned_torch.zluda_cudnn_ops is an OPT-IN ctypes binding to ZLUDA's
+cuDNN-ABI shim (third_party/ZLUDA's zluda_dnn9 -> libcudnn.so.9), and the
+first thing to know about it is that it does NOT run cuDNN kernels on AMD
+hardware -- nothing can. cuDNN ships as precompiled SASS for NVIDIA SM
+targets, so there is no source and no retargetable IR for ZLUDA's PTX
+compiler to translate. zluda_dnn is a REIMPLEMENTATION of a slice of the
+cuDNN C API on top of MIOpen (its Cargo.toml depends on miopen-sys and
+hip_runtime-sys), so the kernels at the end of this call chain are the
+same MIOpen ones stock torch.nn.functional.conv2d already reaches. It is
+therefore NOT a performance tier and is deliberately NOT installed by
+enable()/disable() or entered into kernel_select.py's contests -- routing
+torch -> cuDNN-shim -> MIOpen to reach kernels torch already calls
+directly can only add overhead. What it IS for: a second, independent
+route to MIOpen conv for cross-checking a suspect result or algorithm
+choice (see miopen_fallback.py for why that is a live concern on this
+hardware), with algorithms() exposing MIOpen's ranked solver list through
+cuDNN's GetConvolution*Algorithm_v7 surface -- a view PyTorch does not
+offer -- and an end-to-end check that a local ZLUDA build works. Scope is
+fixed by ZLUDA, not by that file: 34 of the 220 cuDNN 9 entry points are
+implemented (32 of them safe to call -- two have todo!() bodies that abort
+the process), all convolution, with the entire cudnnBackend* graph API (what
+the cuDNN frontend and modern PyTorch conv/attention paths actually use)
+plus RNN/batchnorm/softmax/activation/pooling/dropout/cudnnAddTensor all
+returning CUDNN_STATUS_NOT_SUPPORTED, and the conv path itself 2D-only and
+cross-correlation-only. Gated behind AMD_TUNED_TORCH_ENABLE_ZLUDA_CUDNN=1
+(same shape as AMD_TUNED_TORCH_ENABLE_TE) because merely importing this
+package must not dlopen a shim and create a MIOpen handle, and because a
+DEBUG-built libcudnn.so.9 aborts the process on any unimplemented call
+rather than returning an error -- zluda_cudnn_ops refuses a target/debug
+path for exactly that reason. ZLUDA is a cargo workspace and is not built
+by setup.py; build just this crate with tools/build_zluda_cudnn.sh.
+UNVALIDATED ON REAL HARDWARE, and there is no cargo in the environment
+this was written in, so it has never been built here either: enum
+ordinals, struct layouts and argument order are transcribed from ZLUDA's
+own generated bindings (cuda_types/src/cudnn{,9}.rs, cuda_macros/src/
+cudnn9.rs) and the shape/descriptor arithmetic is unit-tested against a
+mocked library, but whether the ctypes argtypes match the compiled .so at
+the ABI level cannot be checked without one -- a mismatch there is a
+segfault, not an exception. See zluda_cudnn_ops.py's own docstring for the
+four specific ABI landmines it works around.
+
 amd_tuned_torch.rocm_env_check is advisory only -- unlike everything else
 listed here, it never touches torch/ROCm behavior at all, just reads
 os.environ (and this package's own tier-availability state) at import time
@@ -327,8 +455,8 @@ module docstring for why -- a TE build that's ABI-mismatched against the
 installed PyTorch/ROCm can segfault the whole process just from `import
 transformer_engine.pytorch`, which no amount of try/except in this package
 can catch. With TE disabled (the default), `import amd_tuned_torch` can never
-crash for that reason; enable()/te_ops.available() just skip the four
-TE-backed patches (attention/rms_norm/gelu/silu) and those ops stay on
+crash for that reason; enable()/te_ops.available() just skip the
+TE-backed patches (attention/layer_norm/rms_norm) and those ops stay on
 stock PyTorch. Verify
 `python -c "import transformer_engine.pytorch"` works cleanly on its own
 before setting AMD_TUNED_TORCH_ENABLE_TE=1.
@@ -353,12 +481,12 @@ every patched call for these six falls back to the stock op whenever
 autograd is live for the tensors involved, exactly like the original
 Turing version's fallback behavior.
 
-attention/rms_norm/gelu/silu are DIFFERENT: te_ops.py wraps each one in a
+the TE-backed ops are DIFFERENT: te_ops.py wraps each one in a
 real torch.autograd.Function backed by TransformerEngine's own
-forward/backward bindings, so these stay active under autograd -- you get
-the speedup during training too, not just torch.no_grad() inference.
-layer_norm shares this autograd support but isn't auto-installed regardless
-(see above).
+forward/backward bindings, so these stay active under autograd. That is in
+fact the ONLY place they pay off on gfx1100 -- the measured win over stock
+lives in the backward pass, so the patches above deliberately decline
+forward-only (inference) calls and leave them on stock.
 
 Every wrapper falls back to the stock op on RuntimeError or TypeError from
 the native/aiter/TE call (unsupported shape, wrong arg type from a
@@ -455,8 +583,15 @@ from . import nvdiffrast_ops
 from . import torchsparse_ops
 from . import flash_mm_kernel
 from . import rocfft_ops
+from . import vkfft_ops
 from . import boft_ops
 from . import liger_group_norm_ops
+from . import conv_fusion_ops
+from . import fusion_profiler
+from . import zluda_cudnn_ops
+from . import vram_management_ops
+from . import blockscaled_int8_ops
+from . import einsum_ops
 
 
 

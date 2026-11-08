@@ -1,4 +1,5 @@
 import glob
+import importlib.util
 import multiprocessing
 import os
 import shutil
@@ -983,6 +984,67 @@ def _torch_build_suffix() -> str:
 _THIRD_PARTY_TO_INSTALL = ['FlexGEMM', 'torchsparse']
 _INSTALL_THIRD_PARTY = os.environ.get("AMD_TUNED_TORCH_INSTALL_THIRD_PARTY", "1") != "0"
 
+# ALREADY-INSTALLED SKIP. Each of these re-ran `pip install -e .` on every
+# single build of this package, even when the sub-package was already
+# installed and unchanged -- and torchsparse in particular rebuilds its own
+# HIP kernels when it does, which is most of the wall clock of an otherwise
+# incremental `pip install -e .` here. So each one is now skipped when it
+# is already usable.
+#
+# "Usable", not merely "importable": the value is (module the amd_tuned_torch
+# adapter imports, glob for the compiled extension that has to sit inside
+# that package for it to do anything). A source tree whose Python files are
+# on sys.path but whose extension never built is a PARTIAL install, and
+# skipping the rebuild for one of those would leave the adapter's
+# available() reporting False with nothing in the build log explaining why
+# -- exactly the failure this skip must not introduce. Both of these ship
+# exactly one extension:
+#     flex_gemm/kernels/cuda.cpython-*.so   (named cuda even on ROCm)
+#     torchsparse/backend.cpython-*.so
+#
+# NOT checked here: whether that extension was built for the right GPU
+# arch or backend. torchsparse can be importable with a CPU-only backend
+# that silently produces wrong results on ROCm (see torchsparse_ops.py),
+# and nothing short of running a kernel distinguishes that from a good
+# build. Set AMD_TUNED_TORCH_FORCE_THIRD_PARTY=1 to reinstall regardless --
+# which is also what to use after editing anything under third_party/,
+# since an editable install picks up .py edits automatically but NOT
+# changes that need the extension recompiled.
+_THIRD_PARTY_IMPORTS = {
+    'FlexGEMM': ('flex_gemm', os.path.join('kernels', 'cuda*.so')),
+    'torchsparse': ('torchsparse', 'backend*.so'),
+}
+_FORCE_THIRD_PARTY = os.environ.get("AMD_TUNED_TORCH_FORCE_THIRD_PARTY", "0") != "0"
+
+
+def _third_party_already_installed(name):
+    """(already_installed, human-readable reason) for third_party/<name>.
+
+    Uses importlib.util.find_spec rather than importlib.metadata: these are
+    installed editable, their distribution names don't match their import
+    names (FlexGEMM -> flex_gemm), and what actually matters is whether the
+    adapter's own `import` will resolve -- which is what find_spec answers.
+    find_spec does not execute the module either (both are top-level, so
+    there is no parent package to import as a side effect), so this costs
+    nothing and cannot fail on a half-broken install.
+    """
+    entry = _THIRD_PARTY_IMPORTS.get(name)
+    if entry is None:
+        return False, f"no import name recorded for {name}"
+    module, ext_glob = entry
+    try:
+        spec = importlib.util.find_spec(module)
+    except (ImportError, ValueError, AttributeError):
+        spec = None
+    if spec is None or not spec.origin:
+        return False, f"`import {module}` would fail"
+    pkg_dir = os.path.dirname(spec.origin)
+    built = glob.glob(os.path.join(pkg_dir, ext_glob))
+    if not built:
+        return False, (f"{module} resolves to {pkg_dir} but its compiled extension "
+                       f"({ext_glob}) is missing -- partial install, rebuilding")
+    return True, f"{module} -> {pkg_dir} ({os.path.basename(built[0])})"
+
 
 def _install_third_party_packages() -> None:
     if not _INSTALL_THIRD_PARTY:
@@ -998,6 +1060,11 @@ def _install_third_party_package(name: str) -> None:
     subprocess (each has its own independent setup.py/build system, not
     something this file's own CUDAExtension list can absorb).
 
+    Skipped entirely when the package is already installed AND its
+    compiled extension is present -- see _third_party_already_installed
+    for what counts and AMD_TUNED_TORCH_FORCE_THIRD_PARTY=1 for the
+    override to use after editing third_party sources.
+
     NEVER fails the outer build. flexgemm_ops.py/torchsparse_ops.py
     consume these at IMPORT time (available() reports False if missing),
     not at this package's own link time -- unlike hipBLASLt/CK, a failed
@@ -1012,6 +1079,13 @@ def _install_third_party_package(name: str) -> None:
     sub-packages should default to the same target rather than each
     re-running their own CUDA/ROCm auto-detection independently and
     potentially disagreeing with this build or each other."""
+    if not _FORCE_THIRD_PARTY:
+        installed, why = _third_party_already_installed(name)
+        if installed:
+            print(f"setup.py: third_party/{name} already installed -- skipping "
+                  f"({why}); AMD_TUNED_TORCH_FORCE_THIRD_PARTY=1 to reinstall anyway")
+            return
+        print(f"setup.py: third_party/{name} not usable yet: {why}")
     path = os.path.join(_here, 'third_party', name)
     if not os.path.isfile(os.path.join(path, 'setup.py')):
         print(f"setup.py: third_party/{name}/setup.py not found -- skipping "

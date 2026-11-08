@@ -1,0 +1,412 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>CuMesh.js -- in-browser GLB simplifier</title>
+<style>
+  :root { color-scheme: light dark; }
+  body { font-family: system-ui, sans-serif; max-width: 720px; margin: 2rem auto; padding: 0 1rem; line-height: 1.5; }
+  h1 { font-size: 1.3rem; }
+  fieldset { border: 1px solid #8884; border-radius: 8px; margin: 1rem 0; padding: 1rem; }
+  label { display: block; margin: 0.5rem 0; }
+  input[type="range"] { width: 100%; }
+  button { font-size: 1rem; padding: 0.5rem 1.2rem; border-radius: 6px; cursor: pointer; }
+  button:disabled { cursor: not-allowed; opacity: 0.5; }
+  #log { white-space: pre-wrap; font-family: ui-monospace, monospace; font-size: 0.85rem; background: #8881; border-radius: 6px; padding: 0.75rem; min-height: 3rem; max-height: 16rem; overflow-y: auto; }
+  #downloadRow { margin-top: 1rem; }
+  .row { display: flex; gap: 0.5rem; align-items: center; }
+  .row span { min-width: 3.5rem; text-align: right; font-variant-numeric: tabular-nums; }
+</style>
+</head>
+<body>
+<h1>CuMesh.js -- pure-JS mesh simplifier</h1>
+<p>
+  Runs entirely in this tab (no server, no upload) -- a JS/typed-array port of
+  <code>CuMesh</code>'s batched parallel edge-collapse decimator
+  (see <code>source/cmp_ext_turing/third_party/CuMesh_py</code> for the Python
+  version this mirrors). Pick a <code>.glb</code>, choose a target, and simplify.
+</p>
+
+<fieldset>
+  <label>
+    .glb file
+    <input type="file" id="fileInput" accept=".glb,model/gltf-binary" />
+  </label>
+
+  <label>
+    Target face count: <span id="ratioLabel">50%</span> of original
+    <input type="range" id="ratioSlider" min="1" max="99" value="50" />
+  </label>
+
+  <label>
+    <input type="checkbox" id="untexturedOnly" checked />
+    Only simplify parts without a texture (leave textured primitives byte-identical)
+  </label>
+
+  <label>
+    <input type="checkbox" id="useGpu" />
+    Use WebGPU acceleration <span id="gpuStatus"></span>
+  </label>
+
+  <button id="runBtn" disabled>Simplify</button>
+  <button id="cancelBtn" hidden>Cancel</button>
+</fieldset>
+
+<div id="log">Pick a .glb file to begin.</div>
+<div id="downloadRow"></div>
+
+<script type="module">
+  import { isWebGPUSupported } from "./simplify.js";
+  import { parseGLB, loadPrimitives, buildGLB, bakeWorldPositions } from "./glb.js";
+
+  const fileInput = document.getElementById("fileInput");
+  const ratioSlider = document.getElementById("ratioSlider");
+  const ratioLabel = document.getElementById("ratioLabel");
+  const untexturedOnly = document.getElementById("untexturedOnly");
+  const useGpu = document.getElementById("useGpu");
+  const gpuStatus = document.getElementById("gpuStatus");
+  const runBtn = document.getElementById("runBtn");
+  const cancelBtn = document.getElementById("cancelBtn");
+  const logEl = document.getElementById("log");
+  const downloadRow = document.getElementById("downloadRow");
+
+  let currentFile = null;
+
+  if (isWebGPUSupported()) {
+    gpuStatus.textContent = "(available)";
+    useGpu.checked = true;
+  } else {
+    gpuStatus.textContent = "(not available in this browser)";
+    useGpu.disabled = true;
+  }
+
+  // A single CPU pass in simplify.js is fully synchronous -- it only
+  // yields to the event loop *between* passes -- and a large material
+  // group (hundreds of thousands of faces, common in real multi-part CAD
+  // assemblies) can take long enough per pass to freeze the whole tab for
+  // a very long stretch, which looks exactly like a hang even though it
+  // would eventually finish. Running the work in a module Worker keeps
+  // this page responsive no matter how long any one group takes, and lets
+  // Cancel actually stop it (worker.terminate()) instead of being stuck.
+  let worker = null;
+  let nextJobId = 0;
+  const pendingJobs = new Map(); // id -> { resolve, reject, onProgress }
+
+  function createWorker() {
+    const w = new Worker(new URL("./simplify.worker.js", import.meta.url), { type: "module" });
+    w.onmessage = (event) => {
+      const msg = event.data;
+      const job = pendingJobs.get(msg.id);
+      if (!job) return;
+      if (msg.type === "progress") {
+        job.onProgress(msg);
+      } else if (msg.type === "log") {
+        log(`  ${msg.message}`);
+      } else if (msg.type === "done") {
+        pendingJobs.delete(msg.id);
+        job.resolve({ vertices: msg.vertices, faces: msg.faces, faceMask: msg.faceMask });
+      } else if (msg.type === "error") {
+        pendingJobs.delete(msg.id);
+        job.reject(new Error(msg.message));
+      }
+    };
+    w.onerror = (event) => {
+      for (const [id, job] of pendingJobs) {
+        job.reject(new Error(event.message ?? "Worker error"));
+        pendingJobs.delete(id);
+      }
+    };
+    return w;
+  }
+  worker = createWorker();
+
+  cancelBtn.addEventListener("click", () => {
+    worker.terminate(); // hard-stop, even mid-computation
+    worker = createWorker();
+    for (const [id, job] of pendingJobs) {
+      job.reject(new Error("Cancelled"));
+      pendingJobs.delete(id);
+    }
+  });
+
+  // Transfers `vertices`/`faces` into the worker (zero-copy) rather than
+  // structured-cloning them -- safe because the caller is done with these
+  // exact arrays right after kicking the job off (it builds fresh arrays
+  // for the next group). Do not read `vertices`/`faces` after calling this.
+  function runSimplifyInWorker(vertices, faces, targetNumFaces, { useGpu: useGpuJob, onProgress }) {
+    const id = nextJobId++;
+    return new Promise((resolve, reject) => {
+      pendingJobs.set(id, { resolve, reject, onProgress });
+      worker.postMessage(
+        { id, vertices, faces, targetNumFaces, useGpu: useGpuJob, opts: {} },
+        [vertices.buffer, faces.buffer]
+      );
+    });
+  }
+
+  function log(msg) {
+    logEl.textContent += (logEl.textContent ? "\n" : "") + msg;
+    logEl.scrollTop = logEl.scrollHeight;
+  }
+  function resetLog(msg) {
+    logEl.textContent = msg;
+  }
+
+  ratioSlider.addEventListener("input", () => {
+    ratioLabel.textContent = `${ratioSlider.value}%`;
+  });
+
+  fileInput.addEventListener("change", () => {
+    currentFile = fileInput.files[0] ?? null;
+    downloadRow.innerHTML = "";
+    if (currentFile) {
+      resetLog(`Loaded ${currentFile.name} (${(currentFile.size / 1e6).toFixed(1)} MB). Ready.`);
+      runBtn.disabled = false;
+    } else {
+      resetLog("Pick a .glb file to begin.");
+      runBtn.disabled = true;
+    }
+  });
+
+  runBtn.addEventListener("click", async () => {
+    if (!currentFile) return;
+    runBtn.disabled = true;
+    fileInput.disabled = true;
+    cancelBtn.hidden = false;
+    downloadRow.innerHTML = "";
+    try {
+      await run(currentFile);
+    } catch (err) {
+      log(`Error: ${err.message}`);
+      console.error(err);
+    } finally {
+      runBtn.disabled = false;
+      fileInput.disabled = false;
+      cancelBtn.hidden = true;
+    }
+  });
+
+  function totalArea(vertices, faces) {
+    let area = 0;
+    for (let f = 0; f < faces.length / 3; f++) {
+      const ia = faces[f * 3], ib = faces[f * 3 + 1], ic = faces[f * 3 + 2];
+      const ax = vertices[ia * 3], ay = vertices[ia * 3 + 1], az = vertices[ia * 3 + 2];
+      const bx = vertices[ib * 3] - ax, by = vertices[ib * 3 + 1] - ay, bz = vertices[ib * 3 + 2] - az;
+      const cx = vertices[ic * 3] - ax, cy = vertices[ic * 3 + 1] - ay, cz = vertices[ic * 3 + 2] - az;
+      const nx = by * cz - bz * cy, ny = bz * cx - bx * cz, nz = bx * cy - by * cx;
+      area += 0.5 * Math.hypot(nx, ny, nz);
+    }
+    return area;
+  }
+
+  async function run(file) {
+    resetLog("Reading file...");
+    const arrayBuffer = await file.arrayBuffer();
+
+    const { json, bin } = parseGLB(arrayBuffer);
+    const prims = loadPrimitives(json, bin);
+    const totalFaces = prims.reduce((s, p) => s + p.indices.length / 3, 0);
+    log(`Parsed: ${prims.length} primitive(s), ${totalFaces.toLocaleString()} faces total.`);
+
+    const onlyUntextured = untexturedOnly.checked;
+    const targetPrims = onlyUntextured ? prims.filter((p) => !p.textured) : prims;
+    const frozenPrims = onlyUntextured ? prims.filter((p) => p.textured) : [];
+
+    if (onlyUntextured) {
+      log(`  ${frozenPrims.length} textured (kept as-is), ${targetPrims.length} untextured (simplify target).`);
+    }
+    if (targetPrims.length === 0) {
+      log("Nothing to simplify (no untextured primitives found). Leaving the model unchanged.");
+      offerDownload(arrayBuffer, file.name, "unchanged");
+      return;
+    }
+
+    // Instanced primitives (the same mesh referenced by several nodes at
+    // different transforms -- common for repeated parts like bolts in a
+    // CAD assembly) MUST NOT go through the merge-by-material path below:
+    // that path bakes world-space positions and attaches the result to
+    // ONE new node, which collapses every instance down to a single
+    // occurrence -- silently deleting the rest. Instanced primitives are
+    // instead simplified individually, in their own local space, with
+    // their geometry swapped in place (see inPlaceReplacements below), so
+    // every node that instances them keeps doing so correctly.
+    const instancedPrims = targetPrims.filter((p) => p.instanceCount > 1);
+    const mergeablePrims = targetPrims.filter((p) => p.instanceCount <= 1);
+    if (instancedPrims.length > 0) {
+      log(`  ${instancedPrims.length} primitive(s) are instanced (simplified individually, in place).`);
+    }
+
+    // Group the remaining (non-instanced) target primitives by material (a
+    // glTF primitive can only reference one material, so primitives with
+    // DIFFERENT materials can't be merged into a single output primitive
+    // without losing one of them). Even an "untextured" primitive can have
+    // a real material -- base color/metallic/roughness factors,
+    // doubleSided, alphaMode, a shader in every practical sense -- so each
+    // group keeps and reuses its original material index rather than the
+    // merged geometry coming out material-less (which would render as
+    // flat white/default in any viewer, discarding whatever look the
+    // source file authored).
+    const groups = new Map(); // materialIndex (or 'none') -> primitives[]
+    for (const p of mergeablePrims) {
+      const key = p.primitive.material ?? "none";
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key).push(p);
+    }
+    log(`Grouped into ${groups.size} material group(s) for simplification.`);
+
+    const onProgress = ({ pass, faces: f, thresh }) => {
+      log(`  pass ${pass}: faces=${f.toLocaleString()} thresh=${thresh.toExponential(2)}`);
+    };
+    const useGpuThisRun = useGpu.checked && isWebGPUSupported();
+    log(`Engine: ${useGpuThisRun ? "WebGPU" : "CPU (JS)"} (running in a background worker, so this page stays responsive)`);
+
+    const newPrimitives = [];
+    const inPlaceReplacements = [];
+    let totalFacesBefore = 0, totalFacesAfter = 0, areaBeforeSum = 0, areaAfterSum = 0, degenerateSum = 0;
+    const t0 = performance.now();
+
+    // Shared by both the instanced (own local space) and merged
+    // (world-space-baked) paths below.
+    async function simplifyOne(label, vertices, faces) {
+      const targetFaces = Math.max(1, Math.round((faces.length / 3) * (Number(ratioSlider.value) / 100)));
+      const faceCountBefore = faces.length / 3;
+      log(`${label}: V=${(vertices.length / 3).toLocaleString()} F=${faceCountBefore.toLocaleString()} -> target ${targetFaces.toLocaleString()}`);
+
+      const areaBefore = totalArea(vertices, faces);
+
+      // Each GPU pass does ~9 separate device.queue.submit()/mapAsync
+      // round-trips (7 compute kernels + 2 buffer readbacks), and each of
+      // those has real fixed latency (GPU driver IPC) regardless of how
+      // little work is actually being computed. A CAD assembly like this
+      // one commonly has hundreds of tiny per-part groups (tens to
+      // low-thousands of faces) alongside a few genuinely large ones --
+      // for the tiny groups that fixed latency, multiplied by every pass
+      // of every group, dwarfs the actual compute time and is the main
+      // reason "using GPU" can end up slower overall than plain CPU. Below
+      // this size CPU has no such overhead and is simply faster.
+      const GPU_MIN_FACES = 20000;
+      const useGpuForThis = useGpuThisRun && faceCountBefore >= GPU_MIN_FACES;
+
+      let result;
+      if (faceCountBefore <= targetFaces) {
+        // Already at or under target -- skip the worker round-trip
+        // entirely (postMessage + job dispatch overhead) rather than
+        // sending it off just to have simplify()'s own early-return send
+        // it straight back. At a high ratio (e.g. 99%) with hundreds of
+        // small per-part groups/primitives, most hit exactly this case.
+        result = { vertices, faces, faceMask: null };
+      } else {
+        // Runs in the worker: `vertices`/`faces` are transferred (not
+        // copied), so they must not be read again after this call.
+        result = await runSimplifyInWorker(vertices, faces, targetFaces, { useGpu: useGpuForThis, onProgress });
+      }
+
+      const areaAfter = totalArea(result.vertices, result.faces);
+      let degenerate = 0;
+      for (let f = 0; f < result.faces.length / 3; f++) {
+        const a = result.faces[f * 3], b = result.faces[f * 3 + 1], c = result.faces[f * 3 + 2];
+        if (a === b || b === c || a === c) degenerate++;
+      }
+      log(`  -> V=${(result.vertices.length / 3).toLocaleString()} F=${(result.faces.length / 3).toLocaleString()} degenerate=${degenerate}`);
+
+      totalFacesBefore += faceCountBefore;
+      totalFacesAfter += result.faces.length / 3;
+      areaBeforeSum += areaBefore;
+      areaAfterSum += areaAfter;
+      degenerateSum += degenerate;
+
+      return result;
+    }
+
+    // Instanced primitives: simplify each one on its OWN local-space
+    // geometry (not merged with anything, not baked to world space), then
+    // swap its accessors in place -- every node instancing it keeps
+    // instancing it, now at the simplified geometry.
+    for (const p of instancedPrims) {
+      const label = `Instanced [mesh ${p.meshIndex}, x${p.instanceCount}]`;
+      const result = await simplifyOne(label, Float32Array.from(p.positions), Uint32Array.from(p.indices));
+      inPlaceReplacements.push({ meshIndex: p.meshIndex, primIndex: p.primIndex, vertices: result.vertices, faces: result.faces });
+    }
+
+    for (const [materialKey, groupPrims] of groups) {
+      // Merge this group's primitives into one flat vertex/face buffer.
+      // Each primitive's positions are in ITS OWN node's local space --
+      // for real multi-mesh assets (a CAD assembly with many separate
+      // parts, each on its own node/transform) merging raw local-space
+      // positions would silently mis-position every primitive except
+      // whichever one the merged geometry later gets attached under.
+      // Baking each primitive's world transform in first keeps everything
+      // in one consistent space, and buildGLB() attaches the result at a
+      // fresh identity-transform node so it renders at those world
+      // coordinates. This is only safe here because every primitive in
+      // `groups` has instanceCount <= 1 (instanced ones were filtered out
+      // above) -- there is exactly one occurrence to account for.
+      let vertexCount = 0;
+      const vertChunks = [], faceChunks = [];
+      for (const p of groupPrims) {
+        vertChunks.push(bakeWorldPositions(p.positions, p.worldMatrix));
+        faceChunks.push(Uint32Array.from(p.indices, (i) => i + vertexCount));
+        vertexCount += p.positions.length / 3;
+      }
+      const vertices = concatFloat32(vertChunks);
+      const faces = concatUint32(faceChunks);
+
+      const materialLabel = materialKey === "none" ? "no material" : `material ${materialKey}`;
+      const result = await simplifyOne(`Group [${materialLabel}]`, vertices, faces);
+
+      newPrimitives.push({
+        vertices: result.vertices,
+        faces: result.faces,
+        materialIndex: materialKey === "none" ? null : materialKey,
+      });
+    }
+    const dt = (performance.now() - t0) / 1000;
+
+    log(`Done in ${dt.toFixed(1)}s: F ${totalFacesBefore.toLocaleString()} -> ${totalFacesAfter.toLocaleString()}`);
+    log(`Area before=${areaBeforeSum.toFixed(4)} after=${areaAfterSum.toFixed(4)}`);
+    log(`Degenerate faces: ${degenerateSum}`);
+
+    // Only mergeable (non-instanced) primitives get removed -- instanced
+    // ones keep their original primitive slot; their geometry was swapped
+    // in place via inPlaceReplacements instead.
+    const removeRefs = mergeablePrims.map((p) => ({ meshIndex: p.meshIndex, primIndex: p.primIndex }));
+
+    const outBuffer = buildGLB(json, bin, {
+      removePrimitiveRefs: removeRefs,
+      newPrimitives,
+      inPlaceReplacements,
+    });
+
+    offerDownload(outBuffer, file.name, `simplified_${totalFacesAfter}`);
+  }
+
+  function concatFloat32(chunks) {
+    const total = chunks.reduce((s, c) => s + c.length, 0);
+    const out = new Float32Array(total);
+    let o = 0;
+    for (const c of chunks) { out.set(c, o); o += c.length; }
+    return out;
+  }
+  function concatUint32(chunks) {
+    const total = chunks.reduce((s, c) => s + c.length, 0);
+    const out = new Uint32Array(total);
+    let o = 0;
+    for (const c of chunks) { out.set(c, o); o += c.length; }
+    return out;
+  }
+
+  function offerDownload(arrayBuffer, originalName, suffix) {
+    const blob = new Blob([arrayBuffer], { type: "model/gltf-binary" });
+    const url = URL.createObjectURL(blob);
+    const base = originalName.replace(/\.glb$/i, "");
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `${base}_${suffix}.glb`;
+    a.textContent = `Download ${a.download} (${(arrayBuffer.byteLength / 1e6).toFixed(1)} MB)`;
+    downloadRow.innerHTML = "";
+    downloadRow.appendChild(a);
+  }
+</script>
+</body>
+</html>

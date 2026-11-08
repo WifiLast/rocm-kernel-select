@@ -1,0 +1,228 @@
+[
+  {
+    "shape": "2x1280x32x16->1280 k3s1",
+    "dtype": "torch.float16",
+    "calls": 450,
+    "stock_ms": 0.5240382194519043,
+    "ck_ms": 0.5449059486389161,
+    "native_ms": 1.0167945861816405,
+    "winner": "stock",
+    "stock_solvers": [
+      "miopenSp3AsmConv_v30_3_1_gfx11_fp16_dot2_f2x3_stride1"
+    ]
+  },
+  {
+    "shape": "2x1280x64x32->1280 k3s1",
+    "dtype": "torch.float16",
+    "calls": 375,
+    "stock_ms": 1.3715649604797364,
+    "ck_ms": 1.7177703857421875,
+    "native_ms": 3.666489028930664,
+    "winner": "stock",
+    "stock_solvers": [
+      "miopenSp3AsmConv_v30_3_1_gfx11_fp16_dot2_f2x3_stride1"
+    ]
+  },
+  {
+    "shape": "2x320x128x64->320 k3s1",
+    "dtype": "torch.float16",
+    "calls": 315,
+    "stock_ms": 0.4570769786834717,
+    "ck_ms": 0.5556661128997803,
+    "native_ms": 1.05242862701416,
+    "winner": "stock",
+    "stock_solvers": [
+      "miopenSp3AsmConv_v30_3_1_gfx11_fp16_dot2_f2x3_stride1"
+    ]
+  },
+  {
+    "shape": "2x640x64x32->640 k3s1",
+    "dtype": "torch.float16",
+    "calls": 270,
+    "stock_ms": 0.5554261207580566,
+    "ck_ms": 0.5055275440216065,
+    "native_ms": 1.0314273834228516,
+    "winner": "stock",
+    "stock_solvers": [
+      "miopenSp3AsmConv_v30_3_1_gfx11_fp16_dot2_f2x3_stride1"
+    ]
+  },
+  {
+    "shape": "2x640x128x64->640 k3s1",
+    "dtype": "torch.float16",
+    "calls": 243,
+    "stock_ms": 1.2542038917541505,
+    "ck_ms": 1.6543577194213868,
+    "native_ms": 3.3999916076660157,
+    "winner": "stock",
+    "stock_solvers": [
+      "miopenSp3AsmConv_v30_3_1_gfx11_fp16_dot2_f2x3_stride1"
+    ]
+  },
+  {
+    "shape": "2x320x256x128->320 k3s1",
+    "dtype": "torch.float16",
+    "calls": 231,
+    "stock_ms": 1.2722900390625,
+    "ck_ms": 2.2175594329833985,
+    "native_ms": 4.149551773071289,
+    "winner": "stock",
+    "stock_solvers": [
+      "miopenSp3AsmConv_v30_3_1_gfx11_fp16_dot2_f2x3_stride1"
+    ]
+  },
+  {
+    "shape": "2x2560x32x16->1280 k3s1",
+    "dtype": "torch.float16",
+    "calls": 90,
+    "stock_ms": 0.6590372562408447,
+    "ck_ms": 1.0857024192810059,
+    "native_ms": 1.8473123550415038,
+    "winner": "stock",
+    "stock_solvers": [
+      "miopenSp3AsmConv_v30_3_1_gfx11_fp16_dot2_f2x3_stride1"
+    ]
+  },
+  {
+    "shape": "2x2560x32x16->1280 k1s1",
+    "dtype": "torch.float16",
+    "calls": 90,
+    "stock_ms": 0.23503010272979735,
+    "ck_ms": 0.2413191556930542,
+    "native_ms": 0.23299810886383057,
+    "winner": null,
+    "stock_solvers": []
+  },
+  {
+    "shape": "2x640x128x64->320 k3s1",
+    "dtype": "torch.float16",
+    "calls": 90,
+    "stock_ms": 0.6322334289550782,
+    "ck_ms": 1.0454895973205567,
+    "native_ms": 2.0807275772094727,
+    "winner": "stock",
+    "stock_solvers": [
+      "miopenSp3AsmConv_v30_3_1_gfx11_fp16_dot2_f2x3_stride1"
+    ]
+  },
+  {
+    "shape": "2x640x128x64->320 k1s1",
+    "dtype": "torch.float16",
+    "calls": 90,
+    "stock_ms": 0.20336625576019288,
+    "ck_ms": 0.3198070526123047,
+    "native_ms": 0.27888710498809816,
+    "winner": null,
+    "stock_solvers": []
+  },
+  {
+    "shape": "2x2560x64x32->1280 k3s1",
+    "dtype": "torch.float16",
+    "calls": 66,
+    "stock_ms": 2.3632259368896484,
+    "ck_ms": 3.6266143798828123,
+    "native_ms": 7.5706535339355465,
+    "winner": "stock",
+    "stock_solvers": [
+      "miopenSp3AsmConv_v30_3_1_gfx11_fp16_dot2_f2x3_stride1"
+    ]
+  },
+  {
+    "shape": "2x2560x64x32->1280 k1s1",
+    "dtype": "torch.float16",
+    "calls": 66,
+    "stock_ms": 0.44422140121459963,
+    "ck_ms": 1.1212127685546875,
+    "native_ms": 0.9422558784484864,
+    "winner": null,
+    "stock_solvers": []
+  },
+  {
+    "shape": "2x640x256x128->320 k3s1",
+    "dtype": "torch.float16",
+    "calls": 66,
+    "stock_ms": 2.382987403869629,
+    "ck_ms": 4.06937255859375,
+    "native_ms": 8.585102081298828,
+    "winner": "stock",
+    "stock_solvers": [
+      "miopenSp3AsmConv_v30_3_1_gfx11_fp16_dot2_f2x3_stride1"
+    ]
+  },
+  {
+    "shape": "2x640x256x128->320 k1s1",
+    "dtype": "torch.float16",
+    "calls": 66,
+    "stock_ms": 0.5266063690185547,
+    "ck_ms": 1.2783191680908204,
+    "native_ms": 1.148531723022461,
+    "winner": null,
+    "stock_solvers": []
+  },
+  {
+    "shape": "2x320x64x32->640 k3s1",
+    "dtype": "torch.float16",
+    "calls": 45,
+    "stock_ms": 0.2129758596420288,
+    "ck_ms": 0.34383580684661863,
+    "native_ms": 0.5104076385498046,
+    "winner": "stock",
+    "stock_solvers": [
+      "miopenSp3AsmConv_v30_3_1_gfx11_fp16_dot2_f2x3_stride1"
+    ]
+  },
+  {
+    "shape": "2x320x64x32->640 k1s1",
+    "dtype": "torch.float16",
+    "calls": 45,
+    "stock_ms": 0.09435654878616333,
+    "ck_ms": 0.16413580179214476,
+    "native_ms": 0.27970008850097655,
+    "winner": null,
+    "stock_solvers": []
+  },
+  {
+    "shape": "2x640x32x16->1280 k3s1",
+    "dtype": "torch.float16",
+    "calls": 45,
+    "stock_ms": 0.33365468978881835,
+    "ck_ms": 0.2832521438598633,
+    "native_ms": 0.5147461891174316,
+    "winner": "stock",
+    "stock_solvers": [
+      "miopenSp3AsmConv_v30_3_1_gfx11_fp16_dot2_f2x3_stride1"
+    ]
+  },
+  {
+    "shape": "2x640x32x16->1280 k1s1",
+    "dtype": "torch.float16",
+    "calls": 45,
+    "stock_ms": 0.06458125114440919,
+    "ck_ms": 0.06996775269508362,
+    "native_ms": 0.07827590107917785,
+    "winner": null,
+    "stock_solvers": []
+  },
+  {
+    "shape": "2x1920x32x16->1280 k3s1",
+    "dtype": "torch.float16",
+    "calls": 45,
+    "stock_ms": 0.6598213195800782,
+    "ck_ms": 0.9377284049987793,
+    "native_ms": 1.4813719749450684,
+    "winner": "stock",
+    "stock_solvers": [
+      "miopenSp3AsmConv_v30_3_1_gfx11_fp16_dot2_f2x3_stride1"
+    ]
+  },
+  {
+    "shape": "2x1920x32x16->1280 k1s1",
+    "dtype": "torch.float16",
+    "calls": 45,
+    "stock_ms": 0.10689270496368408,
+    "ck_ms": 0.16559430360794067,
+    "native_ms": 0.17977999448776244,
+    "winner": null,
+    "stock_solvers": []
+  }
+]

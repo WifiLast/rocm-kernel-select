@@ -1,0 +1,105 @@
+rms   fp16 8192x768                          route stock   stock   0.205 ms  patched   0.140 ms   1.46x
+rms   fp16 8192x2048                         route hip     stock   0.251 ms  patched   0.192 ms   1.31x
+rms   fp16 8192x5120                         route triton  stock   0.829 ms  patched   0.542 ms   1.53x
+rms   fp16 16384x1024                        route hip     stock   0.286 ms  patched   0.177 ms   1.62x
+rms   fp16 16384x2048                        route hip     stock   0.635 ms  patched   0.465 ms   1.36x
+rms   fp16 16384x3072                        route triton  stock   0.945 ms  patched   0.646 ms   1.46x
+rms   fp16 16384x4096                        route triton  stock   1.228 ms  patched   0.841 ms   1.46x
+rms   fp16 16384x8192                        route triton  stock   2.471 ms  patched   1.659 ms   1.49x
+rms   fp16 32768x4096                        route triton  stock   3.082 ms  patched   1.683 ms   1.83x
+rms   fp16 32768x8192                        route triton  stock   6.179 ms  patched   3.307 ms   1.87x
+layer fp16 8192x768                          route stock   stock   0.152 ms  patched   0.165 ms   0.92x
+layer fp16 8192x2048                         route stock   stock   0.273 ms  patched   0.275 ms   0.99x
+layer fp16 8192x5120                         route stock   stock   0.824 ms  patched   0.831 ms   0.99x
+layer fp16 16384x1024                        route hip     stock   0.332 ms  patched   0.222 ms   1.49x
+layer fp16 16384x2048                        route hip     stock   0.698 ms  patched   0.550 ms   1.27x
+layer fp16 16384x3072                        route stock   stock   0.962 ms  patched   0.966 ms   1.00x
+layer fp16 16384x4096                        route stock   stock   1.257 ms  patched   1.265 ms   0.99x
+layer fp16 16384x8192                        route stock   stock   2.533 ms  patched   2.539 ms   1.00x
+layer fp16 32768x4096                        route hip     stock   3.135 ms  patched   2.168 ms   1.45x
+layer fp16 32768x8192                        route hip     stock   6.253 ms  patched   4.677 ms   1.34x
+sdpa  fp16 B2H16S1024D64 br_mask             route stock   stock   1.894 ms  patched   1.840 ms   1.03x
+sdpa  fp16 B2H16S1024D64 none                route stock   stock   0.965 ms  patched   0.909 ms   1.06x
+sdpa  fp16 B2H16S1024D64 is_causal           route stock   stock   0.663 ms  patched   0.623 ms   1.06x
+sdpa  fp16 B4H16S1024D64 br_mask             route stock   stock   3.455 ms  patched   3.304 ms   1.05x
+sdpa  fp16 B4H16S1024D64 none                route stock   stock   1.609 ms  patched   1.612 ms   1.00x
+sdpa  fp16 B4H16S1024D64 is_causal           route stock   stock   1.062 ms  patched   1.064 ms   1.00x
+sdpa  fp16 B2H8S1024D128 br_mask             route te      stock   2.185 ms  patched   1.852 ms   1.18x
+sdpa  fp16 B2H8S1024D128 none                route stock   stock   1.343 ms  patched   1.329 ms   1.01x
+sdpa  fp16 B2H8S1024D128 is_causal           route stock   stock   0.976 ms  patched   0.964 ms   1.01x
+sdpa  fp16 B2H32S2048D128 br_mask            route te      stock  23.604 ms  patched  15.013 ms   1.57x
+sdpa  fp16 B2H32S2048D128 none               route stock   stock  16.551 ms  patched  16.537 ms   1.00x
+sdpa  fp16 B2H32S2048D128 is_causal          route stock   stock   9.761 ms  patched   9.763 ms   1.00x
+sdpa  fp16 B1H8S512D128 br_mask              route stock   stock   0.425 ms  patched   0.417 ms   1.02x
+sdpa  fp16 B1H8S512D128 none                 route stock   stock   0.324 ms  patched   0.263 ms   1.23x
+sdpa  fp16 B1H8S512D128 is_causal            route stock   stock   0.238 ms  patched   0.246 ms   0.97x
+rms   bf16 8192x768                          route stock   stock   0.139 ms  patched   0.153 ms   0.91x
+rms   bf16 8192x2048                         route hip     stock   0.259 ms  patched   0.189 ms   1.37x
+rms   bf16 8192x5120                         route triton  stock   0.824 ms  patched   0.545 ms   1.51x
+rms   bf16 16384x1024                        route hip     stock   0.299 ms  patched   0.182 ms   1.64x
+rms   bf16 16384x2048                        route hip     stock   0.644 ms  patched   0.470 ms   1.37x
+rms   bf16 16384x3072                        route triton  stock   0.949 ms  patched   0.647 ms   1.47x
+rms   bf16 16384x4096                        route triton  stock   1.231 ms  patched   0.846 ms   1.45x
+rms   bf16 16384x8192                        route triton  stock   2.483 ms  patched   1.663 ms   1.49x
+rms   bf16 32768x4096                        route triton  stock   3.073 ms  patched   1.680 ms   1.83x
+rms   bf16 32768x8192                        route triton  stock   6.196 ms  patched   3.282 ms   1.89x
+layer bf16 8192x768                          route stock   stock   0.129 ms  patched   0.137 ms   0.94x
+layer bf16 8192x2048                         route stock   stock   0.284 ms  patched   0.293 ms   0.97x
+layer bf16 8192x5120                         route stock   stock   0.828 ms  patched   0.833 ms   0.99x
+layer bf16 16384x1024                        route hip     stock   0.346 ms  patched   0.199 ms   1.74x
+layer bf16 16384x2048                        route hip     stock   0.668 ms  patched   0.594 ms   1.13x
+layer bf16 16384x3072                        route stock   stock   0.981 ms  patched   0.987 ms   0.99x
+layer bf16 16384x4096                        route stock   stock   1.273 ms  patched   1.272 ms   1.00x
+layer bf16 16384x8192                        route stock   stock   2.538 ms  patched   2.537 ms   1.00x
+layer bf16 32768x4096                        route hip     stock   3.135 ms  patched   2.539 ms   1.23x
+layer bf16 32768x8192                        route hip     stock   6.271 ms  patched   4.793 ms   1.31x
+sdpa  bf16 B2H16S1024D64 br_mask             route stock   stock   1.734 ms  patched   1.692 ms   1.02x
+sdpa  bf16 B2H16S1024D64 none                route stock   stock   0.927 ms  patched   0.921 ms   1.01x
+sdpa  bf16 B2H16S1024D64 is_causal           route stock   stock   0.694 ms  patched   0.655 ms   1.06x
+sdpa  bf16 B4H16S1024D64 br_mask             route stock   stock   3.126 ms  patched   3.069 ms   1.02x
+sdpa  bf16 B4H16S1024D64 none                route stock   stock   1.633 ms  patched   1.658 ms   0.98x
+sdpa  bf16 B4H16S1024D64 is_causal           route stock   stock   1.136 ms  patched   1.126 ms   1.01x
+sdpa  bf16 B2H8S1024D128 br_mask             route te      stock   2.285 ms  patched   1.868 ms   1.22x
+sdpa  bf16 B2H8S1024D128 none                route stock   stock   1.331 ms  patched   1.318 ms   1.01x
+sdpa  bf16 B2H8S1024D128 is_causal           route stock   stock   0.921 ms  patched   0.902 ms   1.02x
+sdpa  bf16 B2H32S2048D128 br_mask            route te      stock  22.603 ms  patched  15.275 ms   1.48x
+sdpa  bf16 B2H32S2048D128 none               route stock   stock  16.761 ms  patched  16.760 ms   1.00x
+sdpa  bf16 B2H32S2048D128 is_causal          route stock   stock   9.921 ms  patched   9.901 ms   1.00x
+sdpa  bf16 B1H8S512D128 br_mask              route stock   stock   0.433 ms  patched   0.454 ms   0.95x
+sdpa  bf16 B1H8S512D128 none                 route stock   stock   0.290 ms  patched   0.286 ms   1.01x
+sdpa  bf16 B1H8S512D128 is_causal            route stock   stock   0.289 ms  patched   0.264 ms   1.10x
+rms   fp32 8192x768                          route stock   stock   0.143 ms  patched   0.153 ms   0.93x
+rms   fp32 8192x2048                         route hip     stock   0.604 ms  patched   0.461 ms   1.31x
+rms   fp32 8192x5120                         route triton  stock   1.531 ms  patched   1.486 ms   1.03x
+rms   fp32 16384x1024                        route hip     stock   0.586 ms  patched   0.446 ms   1.32x
+rms   fp32 16384x2048                        route hip     stock   1.162 ms  patched   0.910 ms   1.28x
+rms   fp32 16384x3072                        route triton  stock   1.776 ms  patched   1.264 ms   1.40x
+rms   fp32 16384x4096                        route triton  stock   2.341 ms  patched   1.708 ms   1.37x
+rms   fp32 16384x8192                        route triton  stock   4.857 ms  patched   4.509 ms   1.08x
+rms   fp32 32768x4096                        route triton  stock   4.790 ms  patched   3.317 ms   1.44x
+rms   fp32 32768x8192                        route triton  stock  12.630 ms  patched   8.943 ms   1.41x
+layer fp32 8192x768                          route stock   stock   0.134 ms  patched   0.140 ms   0.96x
+layer fp32 8192x2048                         route hip     stock   0.606 ms  patched   0.502 ms   1.21x
+layer fp32 8192x5120                         route hip     stock   1.530 ms  patched   1.217 ms   1.26x
+layer fp32 16384x1024                        route hip     stock   0.589 ms  patched   0.464 ms   1.27x
+layer fp32 16384x2048                        route hip     stock   1.168 ms  patched   0.981 ms   1.19x
+layer fp32 16384x3072                        route hip     stock   1.783 ms  patched   1.459 ms   1.22x
+layer fp32 16384x4096                        route hip     stock   2.347 ms  patched   1.920 ms   1.22x
+layer fp32 16384x8192                        route hip     stock   4.850 ms  patched   4.039 ms   1.20x
+layer fp32 32768x4096                        route hip     stock   4.798 ms  patched   3.831 ms   1.25x
+layer fp32 32768x8192                        route hip     stock  12.605 ms  patched   7.943 ms   1.59x
+sdpa  fp32 B2H16S1024D64 br_mask             route stock   stock  10.076 ms  patched  10.132 ms   0.99x
+sdpa  fp32 B2H16S1024D64 none                route stock   stock   9.384 ms  patched   9.445 ms   0.99x
+sdpa  fp32 B2H16S1024D64 is_causal           route stock   stock   5.710 ms  patched   5.659 ms   1.01x
+sdpa  fp32 B4H16S1024D64 br_mask             route stock   stock  19.201 ms  patched  19.170 ms   1.00x
+sdpa  fp32 B4H16S1024D64 none                route stock   stock  18.222 ms  patched  18.188 ms   1.00x
+sdpa  fp32 B4H16S1024D64 is_causal           route stock   stock  10.960 ms  patched  10.959 ms   1.00x
+sdpa  fp32 B2H8S1024D128 br_mask             route te      stock  13.282 ms  patched   8.381 ms   1.58x
+sdpa  fp32 B2H8S1024D128 none                route te      stock  13.479 ms  patched   6.476 ms   2.08x
+sdpa  fp32 B2H8S1024D128 is_causal           route stock   stock   7.337 ms  patched   7.382 ms   0.99x
+sdpa  fp32 B2H32S2048D128 br_mask            route te      stock 167.437 ms  patched 120.852 ms   1.39x
+sdpa  fp32 B2H32S2048D128 none               route te      stock 159.534 ms  patched  98.467 ms   1.62x
+sdpa  fp32 B2H32S2048D128 is_causal          route stock   stock  86.620 ms  patched  86.578 ms   1.00x
+sdpa  fp32 B1H8S512D128 br_mask              route stock   stock   3.088 ms  patched   3.092 ms   1.00x
+sdpa  fp32 B1H8S512D128 none                 route stock   stock   2.248 ms  patched   2.248 ms   1.00x
+sdpa  fp32 B1H8S512D128 is_causal            route stock   stock   1.579 ms  patched   1.560 ms   1.01x

@@ -1,10 +1,15 @@
 """Tests for amd_tuned_torch.liger_group_norm_ops -- CPU-safe, no Triton/GPU
-required. available() is False without Triton+CUDA/ROCm (true in this dev
-environment), so group_norm()/LigerGroupNorm always take their F.group_norm
-fallback path here -- exercised for real (not mocked), including a real
-backward pass, since that path has no hardware dependency at all. The
-Triton kernel itself needs a real device to compile/launch and is not
-exercised here -- see the module's own VALIDATION STATUS docstring section.
+required. Everything here runs on CPU tensors, which group_norm()/
+LigerGroupNorm always serve from their F.group_norm fallback path
+(available() gates on torch.cuda.is_available(), and x.is_cuda gates the
+call itself) -- exercised for real, not mocked, including a real backward
+pass, since that path has no hardware dependency at all.
+
+The Triton kernels are NOT exercised here; they need a real device to
+compile and launch. Their numeric checks against F.group_norm, on the real
+4D SDXL shapes and all three gradients, live in the companion
+test_liger_group_norm_ops_gpu.py, which skips itself when available() is
+False.
 
 Run with:
 
@@ -20,10 +25,19 @@ from amd_tuned_torch import liger_group_norm_ops as gn
 
 
 class TestAvailable:
-    def test_false_without_triton_or_gpu(self):
-        # This dev environment has neither -- available() must not raise
-        # either way, and must be a plain bool.
-        assert gn.available() is False
+    def test_is_a_bool_and_false_without_a_device(self):
+        # Was `assert available() is False`, which only held on a box with
+        # no Triton and no GPU -- it fails on any machine that has them
+        # (e.g. the gfx1100 box this module is actually meant for), where
+        # nothing about the module is broken. What is worth asserting
+        # everywhere: it never raises, it is a plain bool, and with no
+        # visible device it is False no matter what Triton reports (that
+        # False is what sends group_norm()/LigerGroupNorm down the
+        # F.group_norm path the rest of this file exercises).
+        got = gn.available()
+        assert isinstance(got, bool)
+        if not torch.cuda.is_available():
+            assert got is False
 
 
 class TestGroupNormFallback:

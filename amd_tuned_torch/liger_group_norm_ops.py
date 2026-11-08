@@ -6,18 +6,29 @@ modules).
 
 WHY THIS EXISTS. amd_tuned_torch's own native HIP group_norm kernel
 (src/cuda/group_norm.cu, reached via amd_tuned_torch.ops.group_norm /
-the default F.group_norm monkeypatch) is FORWARD-ONLY -- `_grad_safe()`
-falls back to stock the instant any input requires_grad, and during LoRA/
-LyCORIS training that is true for essentially every call in the network
-(the same "some upstream adapter needs a gradient, so every activation
-downstream of it does too" finding already documented for conv2d/linear/
-bmm's own grad-safety gates in this package). SDXL's UNet is built almost
-entirely out of GroupNorm-normalized ResNet blocks, so the package's
-default GroupNorm tier gives a LoRA training script exactly zero
-acceleration on that op today -- not a narrow gap, the common case. This
-module is a SEPARATE tier with a genuine `torch.autograd.Function`
-backward, specifically so a training script can opt into GroupNorm
-acceleration where the default monkeypatch structurally cannot help.
+the default F.group_norm monkeypatch) is FORWARD-ONLY. That used to mean
+`_grad_safe()` sent every GroupNorm call straight back to stock during
+training -- essentially every call in the network, since once one LoRA/
+LyCORIS adapter needs a gradient autograd must backprop through every
+frozen layer between it and the loss, so nearly every activation
+requires_grad. SDXL's UNet and VAE are built almost entirely out of
+GroupNorm-normalized ResNet blocks, so the default tier gave a training
+script zero GroupNorm acceleration: not a narrow gap, the common case,
+and the reason this module was written.
+
+THAT IS NO LONGER THE ONLY WAY IN. `_GroupNormFn` in _dispatch.py now
+wraps the default tier's accelerated forward in a real
+torch.autograd.Function whose backward is GroupNorm's textbook
+derivative in plain torch ops, so the default F.group_norm monkeypatch
+accelerates the FORWARD during training too, without this module. What
+this module still offers over that is a fused Triton kernel on both
+sides -- one kernel for the forward, one for the backward, instead of an
+accelerated forward plus a backward built out of several separate
+reduction/elementwise ops. Which one actually wins on a given shape is
+not measured here, so treat this tier as an experiment to benchmark
+rather than an automatic upgrade; train_lycoris_mod.py keeps it behind
+--enable_liger_groupnorm for that reason as much as for the bug history
+below.
 
 WHY A DROP-IN nn.Module INSTEAD OF A MONKEYPATCH. F.group_norm has no
 "which candidate is faster AND differentiable" contest the way conv2d/
@@ -32,21 +43,47 @@ below) -- explicit opt-in on the exact module tree it's meant for, same
 posture as this package's other "plain library surface, not a monkeypatch
 target" tiers (cumesh_ops, flexgemm_ops's sparse-3D ops, flash_mm_kernel).
 
-VALIDATION STATUS -- READ BEFORE TRUSTING THIS ON HARDWARE. Unlike most
-"unvalidated" ports in this package, the kernel this was copied from DOES
-have real upstream AMD CI (Liger-Kernel ships official, actively-tested
-ROCm support -- see its own README's AMD CI badge and "Full AMD support"
-v0.4.0 release note) -- this is not a "no ROCm claim at all" situation
-like Megatron's SwiGLU (swiglu_ops.py) or the vendored flash-attention
-kernel. What IS still unvalidated is THIS SPECIFIC COPY: it has never been
-compiled or run in this project's own environment (no Triton install, no
-CUDA/ROCm device here -- see available() below), on gfx1100 specifically,
-or against this package's own dtype/shape conventions. Before relying on
-this for real training: compare `group_norm(x, ...)` output AND gradients
-(x.grad, weight.grad, bias.grad) against `F.group_norm`'s own for your
-actual (batch, channels, *spatial, num_groups, dtype) combinations -- a
-plain numerical mismatch is the realistic failure mode for a kernel this
-close to verbatim-copied from a well-tested source, not a subtle one.
+VALIDATION STATUS. This copy HAS now been run on gfx1100 (RX 7900 XTX,
+torch 2.15 / ROCm 7.2, Triton), and the check this section used to ask for
+-- output plus x.grad/weight.grad/bias.grad against F.group_norm, on the
+real 4D SDXL GroupNorm shapes in fp32 and fp16 -- is a test:
+source/cmp_ext_turing/tests/test_liger_group_norm_ops_gpu.py. It skips
+itself when available() is False, so a CPU-only checkout still gets the
+F.group_norm-fallback coverage in test_liger_group_norm_ops.py and nothing
+else.
+
+That first hardware run found three real bugs, all of them in the paths a
+LoRA/LyCORIS SDXL training script actually takes, and all now fixed:
+
+  1. DX under-allocated in _group_norm_backward (HIP 700). The backward
+     kept upstream Liger's `hidden_size = dY.shape[-1]`, which is the
+     per-channel element count only for the 3D inputs upstream documents;
+     for 4D NCHW it is just W, while the backward kernel indexes per
+     channel with a H*W stride. DX was allocated at 40,960 elements for
+     (1, 320, 128, 128) with 32 groups and written ~5.2M elements in --
+     an out-of-bounds device write, hipErrorIllegalAddress on the first
+     backward pass of every run using this tier. See that function's own
+     SHAPE CONTRACT docstring.
+  2. fp16 reductions overflowing to inf. tl.sum over an fp16 block
+     returns fp16, and one SDXL group is up to 163,840 elements; the sum
+     of that many unit-variance squares exceeds fp16's 65504 ceiling, so
+     variance/rstd came out garbage and ~15% of the forward output was
+     wrong by up to 13.1 absolute -- silent corruption of an fp16
+     training run, which is the default precision for SDXL. Both kernels
+     now load into fp32 and Mean/RSTD are fp32 buffers.
+  3. bf16 atomics into an fp16 buffer. `dtype` was tl.bfloat16 for every
+     non-fp32 input, so an fp16 run atomically added bf16 values into an
+     fp16 DW/DB. Those are fp32 accumulators now, cast back to the
+     parameter dtype on return.
+
+Bugs 1 and 2 were both invisible to the `except RuntimeError -> stock
+F.group_norm` guard in group_norm(): an async illegal address has already
+poisoned the HIP context by the time anything raises, and wrong numbers
+raise nothing at all.
+
+Even so, train_lycoris_mod.py keeps this tier OPT-IN (--enable_liger_groupnorm,
+default off) rather than trusting the green test: stock nn.GroupNorm is
+always correct, and this is the one tier that has taken the device down.
 """
 from __future__ import annotations
 
@@ -113,12 +150,24 @@ if _TRITON_AVAILABLE:
 
         block_range = tl.arange(0, BLOCK_SIZE)
 
+        # .to(tl.float32) on every load in this kernel is load-bearing,
+        # not defensive: tl.sum over an fp16 block returns fp16, and one
+        # SDXL group is channels_per_group * H * W elements -- 10 * 128 *
+        # 128 = 163,840 for the first UNet block. Summing that many
+        # unit-variance squares in fp16 OVERFLOWS (fp16 tops out at
+        # 65504): squared_sum became inf, variance and rstd garbage, and
+        # ~15% of the output tensor came back wrong by up to 13.1
+        # absolute against F.group_norm -- silent training corruption,
+        # not noise. Stock GroupNorm accumulates in fp32 for exactly this
+        # reason; Mean/RSTD are fp32 buffers now too (see
+        # _group_norm_forward), so the backward pass reads them back at
+        # full precision as well.
         s = 0.0
         squared_sum = 0.0
         for i in tl.range(0, hidden_size, BLOCK_SIZE):
             hidden_size_offsets = i + block_range
             mask = hidden_size_offsets < hidden_size
-            X = tl.load(X_ptr + hidden_size_offsets, mask=mask, other=0.0)
+            X = tl.load(X_ptr + hidden_size_offsets, mask=mask, other=0.0).to(tl.float32)
             s += tl.sum(X)
             squared_sum += tl.sum(X * X)
 
@@ -133,12 +182,17 @@ if _TRITON_AVAILABLE:
         for i in tl.range(0, hidden_size, BLOCK_SIZE):
             hidden_size_offsets = i + block_range
             mask = hidden_size_offsets < hidden_size
-            X = tl.load(X_ptr + hidden_size_offsets, mask=mask, other=m)
+            # other=0.0 (not other=m) since these lanes are masked out
+            # of the store below anyway, and mixing an fp32 `m` into an
+            # fp16 load's `other` is exactly the kind of implicit
+            # promotion this kernel should not be relying on.
+            X = tl.load(X_ptr + hidden_size_offsets, mask=mask, other=0.0).to(tl.float32)
             local_channel = hidden_size_offsets // hidden_size_per_channel
             global_channel = group_idx * channels_per_group + local_channel
-            W = tl.load(W_ptr + global_channel, mask=mask)
-            B = tl.load(B_ptr + global_channel, mask=mask)
+            W = tl.load(W_ptr + global_channel, mask=mask).to(tl.float32)
+            B = tl.load(B_ptr + global_channel, mask=mask).to(tl.float32)
             Y = (X - m) * rstd * W + B
+            # Y is fp32; the store converts to Y_ptr's own dtype.
             tl.store(Y_ptr + hidden_size_offsets, Y, mask=mask)
 
         tl.store(Mean_ptr + batch_idx * Mean_row_stride + group_idx * Mean_col_stride, m)
@@ -179,13 +233,16 @@ if _TRITON_AVAILABLE:
         for channel_idx in range(group_idx * channels_per_group, (group_idx + 1) * channels_per_group):
             dW = 0.0
             dB = 0.0
-            W = tl.load(W_ptr + channel_idx)
+            W = tl.load(W_ptr + channel_idx).to(tl.float32)
             for i in tl.range(0, hidden_size, BLOCK_SIZE):
                 hidden_size_offsets = i + block_range
                 mask = hidden_size_offsets < hidden_size
-                X = tl.load(X_ptr + channel_idx * X_col_stride + hidden_size_offsets, mask=mask, other=0.0)
+                # fp32 for the same overflow reason as the forward
+                # kernel -- these reductions run over the whole group.
+                X = tl.load(X_ptr + channel_idx * X_col_stride + hidden_size_offsets,
+                            mask=mask, other=0.0).to(tl.float32)
                 UPSTREAM_grad = tl.load(UPSTREAM_ptr + channel_idx * X_col_stride + hidden_size_offsets,
-                                        mask=mask, other=0.0)
+                                        mask=mask, other=0.0).to(tl.float32)
 
                 x_hat = (X - mean) * rstd
                 dW += tl.sum(UPSTREAM_grad * x_hat)
@@ -205,17 +262,19 @@ if _TRITON_AVAILABLE:
         c2 = c2 / N
 
         for channel_idx in tl.range(group_idx * channels_per_group, (group_idx + 1) * channels_per_group):
-            W = tl.load(W_ptr + channel_idx)
+            W = tl.load(W_ptr + channel_idx).to(tl.float32)
             for i in range(0, hidden_size, BLOCK_SIZE):
                 hidden_size_offsets = i + block_range
                 mask = hidden_size_offsets < hidden_size
-                X = tl.load(X_ptr + channel_idx * X_col_stride + hidden_size_offsets, mask=mask, other=0.0)
+                X = tl.load(X_ptr + channel_idx * X_col_stride + hidden_size_offsets,
+                            mask=mask, other=0.0).to(tl.float32)
                 UPSTREAM_grad = tl.load(UPSTREAM_ptr + channel_idx * X_col_stride + hidden_size_offsets,
-                                        mask=mask, other=0.0)
+                                        mask=mask, other=0.0).to(tl.float32)
 
                 x_hat = (X - mean) * rstd
                 wdy = W * UPSTREAM_grad
                 dx = (wdy - (x_hat * c1 + c2)) * rstd
+                # dx is fp32; the store converts to DX_ptr's own dtype.
                 tl.store(DX_ptr + channel_idx * X_col_stride + hidden_size_offsets, dx, mask=mask)
 
 
@@ -227,8 +286,12 @@ def _group_norm_forward(X, num_channels, num_groups, W, B, eps):
     hidden_size = X.shape[-1]
     BLOCK_SIZE = min(_MAX_FUSED_SIZE, triton.next_power_of_2(hidden_size))
     Y = torch.empty((batch_size, num_groups, hidden_size), dtype=X.dtype, device=X.device)
-    Mean = torch.zeros((batch_size, num_groups), dtype=X.dtype, device=X.device)
-    RSTD = torch.zeros((batch_size, num_groups), dtype=X.dtype, device=X.device)
+    # fp32 regardless of X's dtype: these are the per-group mean and
+    # reciprocal std the backward pass reads back, and rounding them to
+    # fp16 throws away precision the kernel just spent fp32 accumulators
+    # earning (upstream keeps them in X.dtype).
+    Mean = torch.zeros((batch_size, num_groups), dtype=torch.float32, device=X.device)
+    RSTD = torch.zeros((batch_size, num_groups), dtype=torch.float32, device=X.device)
 
     _group_norm_forward_kernel[(batch_size, num_groups)](
         Y, Y.stride(0), Y.stride(1),
@@ -242,26 +305,66 @@ def _group_norm_forward(X, num_channels, num_groups, W, B, eps):
 
 
 def _group_norm_backward(dY, X, W, B, Mean, RSTD, num_channels, num_groups):
-    shape = dY.shape
+    """Gradients for _group_norm_forward.
+
+    SHAPE CONTRACT -- the reason this is not upstream Liger's version.
+    _group_norm_backward_kernel indexes PER CHANNEL: `channel_idx *
+    X_col_stride + offsets`, with `offsets < hidden_size`. So its
+    `hidden_size` is the per-CHANNEL element count (H*W for 4D NCHW, H for
+    3D) and `X_col_stride` the per-channel stride -- unlike
+    _group_norm_forward, which was rewritten here to walk each group's
+    whole flat span at once and whose `hidden_size` is therefore
+    per-GROUP (channels_per_group * H * W).
+
+    Upstream Liger takes `hidden_size = dY.shape[-1]`, which is only the
+    per-channel count for the 3D (batch, channels, hidden) inputs it
+    documents. Handed SDXL's 4D NCHW GroupNorm activations that is just W:
+    the kernel then walked 1/H of each channel and, worse, DX was
+    allocated at `hidden_size * channels_per_group` elements per group
+    while the kernel's own stores reach `channel_idx * H*W + W` -- for the
+    first SDXL block, (1, 320, 128, 128) with 32 groups, a 40,960-element
+    buffer written up to ~5.2M elements in. That is an out-of-bounds
+    device write: HIP 700 / hipErrorIllegalAddress on the first backward
+    pass of any run using this tier, which is what it did on gfx1100. The
+    `except RuntimeError -> F.group_norm` guard in group_norm() cannot
+    catch it either, since an async illegal address has already poisoned
+    the HIP context by the time anything raises.
+
+    DX therefore has to be X's own full shape, and (since the kernel
+    reuses X_row_stride/X_col_stride to address DX) laid out exactly like
+    X -- empty_like on a contiguous X, with the strides passed explicitly
+    below rather than read off X, so the two can't drift apart again.
+    """
+    shape = X.shape
     batch_size = shape[0]
-    hidden_size = dY.shape[-1]
     channels_per_group = num_channels // num_groups
-    dY = dY.view(batch_size, num_groups, -1)
-    DX = torch.empty((batch_size, num_groups, hidden_size * channels_per_group),
-                      dtype=X.dtype, device=X.device)
-    DW = torch.zeros((num_channels,), dtype=W.dtype, device=W.device)
-    DB = torch.zeros((num_channels,), dtype=B.dtype, device=B.device)
-    triton_dtype = tl.float32 if X.dtype == torch.float32 else tl.bfloat16
+    # Per-channel element count: H*W for 4D NCHW, H for 3D, 1 for 2D --
+    # derived from numel so it holds for any spatial rank, unlike
+    # shape[-1].
+    hidden_size = X.numel() // (batch_size * num_channels)
+
+    X = X.contiguous()
+    dY = dY.contiguous()
+    DX = torch.empty_like(X)
+    # fp32 accumulators for the per-channel weight/bias gradients, cast
+    # back at the end. Upstream atomically adds these in the parameter
+    # dtype, which here would be a genuine correctness bug and a
+    # precision one: `dtype` was tl.bfloat16 for every non-fp32 input, so
+    # an fp16 run (SDXL mixed precision) atomically added bf16 values
+    # into an fp16 buffer; and summing H*W*batch terms into one fp16
+    # scalar loses accuracy badly even when the types do line up.
+    DW = torch.zeros((num_channels,), dtype=torch.float32, device=W.device)
+    DB = torch.zeros((num_channels,), dtype=torch.float32, device=B.device)
 
     BLOCK_SIZE = min(_MAX_FUSED_SIZE, triton.next_power_of_2(hidden_size))
     _group_norm_backward_kernel[(batch_size, num_groups)](
-        X, X.stride(0), X.stride(1),
+        X, num_channels * hidden_size, hidden_size,
         W, Mean, Mean.stride(0), Mean.stride(1), RSTD,
         DX, DW, DB, dY,
         hidden_size, channels_per_group,
-        BLOCK_SIZE=BLOCK_SIZE, dtype=triton_dtype,
+        BLOCK_SIZE=BLOCK_SIZE, dtype=tl.float32,
     )
-    return DX.view(*shape), DW, DB
+    return DX.view(*shape), DW.to(W.dtype), DB.to(B.dtype)
 
 
 class _LigerGroupNormFunction(torch.autograd.Function):

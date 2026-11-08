@@ -277,7 +277,12 @@ class TestEnableDisable:
             amd_tuned_torch.disable()
 
     def test_enable_skips_te_backed_ops_when_te_unavailable(self, monkeypatch):
+        # "No backend for this op" now means neither TE nor comfy-kitchen:
+        # enable() installs the norm and attention wrappers for either, since
+        # they cover disjoint cases (TE the training shapes, comfy-kitchen the
+        # forward-only ones TE declines). See enable() and _comfy_norm.
         monkeypatch.setattr(amd_tuned_torch.te_ops, "available", lambda: False)
+        monkeypatch.setattr(amd_tuned_torch._dispatch, "_COMFY", False)
         orig_rms_norm = F.rms_norm if hasattr(F, "rms_norm") else None
         assert not amd_tuned_torch.is_enabled()
         amd_tuned_torch.enable()
@@ -288,19 +293,29 @@ class TestEnableDisable:
             amd_tuned_torch.disable()
 
     def test_enable_installs_te_backed_ops_when_available(self, te):
+        # The TE-backed ops enable() installs: the two norms and attention.
+        # gelu/silu are TE-backed as well but stay OFF by default -- they
+        # never measured faster than stock (see _dispatch.py's _TE_* block
+        # and TestTeInstallSet). Installing a patch that can only lose
+        # would cost dispatch overhead for nothing.
         assert not amd_tuned_torch.is_enabled()
         amd_tuned_torch.enable()
         try:
-            assert F.gelu is amd_tuned_torch._patched_gelu
-            assert F.silu is amd_tuned_torch._patched_silu
+            assert F.layer_norm is amd_tuned_torch._patched_layer_norm
+            assert F.rms_norm is amd_tuned_torch._patched_rms_norm
             assert F.scaled_dot_product_attention is amd_tuned_torch._patched_sdpa
+            assert F.gelu is not amd_tuned_torch._patched_gelu
+            assert F.silu is not amd_tuned_torch._patched_silu
         finally:
             amd_tuned_torch.disable()
 
-    def test_enable_never_installs_layer_norm(self, aiter, te):
-        # TE's layernorm_fwd benchmarked slower than stock on RX 7900 XTX
-        # (see benchmark.json) -- enable() leaves it on stock regardless of
-        # aiter/TE availability.
+    def test_enable_leaves_layer_norm_stock_without_te(self, aiter, monkeypatch):
+        # No TE (no `te` fixture) and no comfy-kitchen -- layer_norm has
+        # nothing to be routed to and must stay stock. With TE available it IS
+        # now installed; see TestTeInstallSet::test_enable_installs_layer_norm
+        # for that half, and _dispatch.py's _TE_* block for why the old blanket
+        # exclusion (a forward-only 0.71x) no longer describes the op.
+        monkeypatch.setattr(amd_tuned_torch._dispatch, "_COMFY", False)
         orig_layer_norm = F.layer_norm
         assert not amd_tuned_torch.is_enabled()
         amd_tuned_torch.enable()
@@ -309,7 +324,36 @@ class TestEnableDisable:
         finally:
             amd_tuned_torch.disable()
 
-    def test_disable_restores_stock_functions(self, aiter):
+    def test_enable_installs_norms_and_sdpa_for_comfy_kitchen_without_te(
+            self, aiter, monkeypatch):
+        # The other half of the widened gate: comfy-kitchen's adaln/rms_adaln
+        # and its decode attention are inference-only kernels, which is exactly
+        # the case TE declines by design -- so a machine with no TE build must
+        # still get these three wrappers installed. Gating them on TE alone
+        # withheld the whole tier, the same way the old aiter-only gate
+        # withheld hipBLASLt and CK from F.linear.
+        monkeypatch.setattr(amd_tuned_torch.te_ops, "available", lambda: False)
+        monkeypatch.setattr(amd_tuned_torch._dispatch, "_COMFY", True)
+        assert not amd_tuned_torch.is_enabled()
+        amd_tuned_torch.enable()
+        try:
+            assert F.layer_norm is amd_tuned_torch._patched_layer_norm
+            assert F.rms_norm is amd_tuned_torch._patched_rms_norm
+            assert F.scaled_dot_product_attention is amd_tuned_torch._patched_sdpa
+            # ...but not the TE-only activations, which comfy-kitchen has no
+            # kernels for at all.
+            assert F.gelu is not amd_tuned_torch._patched_gelu
+            assert F.silu is not amd_tuned_torch._patched_silu
+        finally:
+            amd_tuned_torch.disable()
+
+    def test_disable_restores_stock_functions(self, aiter, monkeypatch):
+        # STOCK_UNPATCHED lists ops enable() leaves alone in THIS
+        # configuration, and layer_norm is only in it because neither TE nor
+        # comfy-kitchen is supposed to be there to install it (see conftest).
+        # The `aiter` fixture covers the TE half by omission; comfy-kitchen is
+        # a real, installed extension on some machines, so it has to be pinned.
+        monkeypatch.setattr(amd_tuned_torch._dispatch, "_COMFY", False)
         for (target, name), orig in STOCK_UNPATCHED.items():
             assert getattr(target, name) is orig
         amd_tuned_torch.enable()
@@ -327,7 +371,13 @@ class TestEnableDisable:
         finally:
             amd_tuned_torch.disable()
 
-    def test_stock_unpatched_ops_never_touched(self, aiter):
+    def test_stock_unpatched_ops_never_touched(self, aiter, monkeypatch):
+        # Same premise as test_disable_restores_stock_functions: layer_norm is
+        # in STOCK_UNPATCHED only because nothing is supposed to be installed
+        # behind it here. Omitting the `te` fixture covers TE; comfy-kitchen is
+        # a real extension that may be installed on the machine running this,
+        # so it is pinned off rather than assumed absent.
+        monkeypatch.setattr(amd_tuned_torch._dispatch, "_COMFY", False)
         amd_tuned_torch.enable()
         try:
             for (target, name), orig in STOCK_UNPATCHED.items():
@@ -1182,6 +1232,13 @@ class TestTritonKernelsRmsnormDispatch:
         to _patched_rms_norm (the TE tier), not straight to stock. Cleanup
         undoes these LIFO, same lesson as TestConv3dWinogradFp16Dispatch."""
         monkeypatch.setattr(amd_tuned_torch._dispatch, "_usable", lambda *a, **k: True)
+        # Not force_eligible(): this test needs the REAL _grad_safe, because
+        # "autograd is live" is exactly what makes our tier decline. It does
+        # need the TE tier's size gate out of the way though -- a (2,4,8)
+        # tensor is 8 rows, far below _TE_NORM_MIN_ROWS -- or _patched_rms_norm
+        # would fall through to stock for a reason that has nothing to do
+        # with the tier ordering under test.
+        monkeypatch.setattr(amd_tuned_torch._dispatch, "_TE_NORM_MIN_ROWS", 0)
         monkeypatch.setattr(amd_tuned_torch.triton_kernels_ops, "available", lambda: True)
         was_enabled = amd_tuned_torch.is_enabled()
         if not was_enabled:
@@ -1539,6 +1596,216 @@ class TestPatchedSdpa:
         mask = torch.tril(torch.ones(3, 3, dtype=torch.bool))
         amd_tuned_torch._patched_sdpa(q, k, v, attn_mask=mask, is_causal=True)
         te.scaled_dot_product_attention.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# TE performance policy -- the second layer of gates on the TE-backed
+# wrappers, on top of the _usable/_grad_safe eligibility checks.
+#
+# These guards decline calls TE would compute perfectly CORRECTLY, purely
+# because tools/bench_te_ops.py measured them slower than stock on gfx1100
+# (numbers and reasoning: the _TE_* block in _dispatch.py). They are the
+# difference between "amd_tuned_torch can do this" and "amd_tuned_torch should",
+# so they get asserted directly rather than through force_eligible -- which
+# deliberately neutralizes every one of them (see tests/conftest.py).
+#
+# _ORIGINALS is seeded per test instead of calling enable(): these wrappers
+# read the stock function out of it on entry, and seeding is both cheaper
+# and free of the global torch-state mutation enable() would do.
+# ---------------------------------------------------------------------------
+
+class TestTePerformanceGates:
+    @staticmethod
+    def _seed(monkeypatch, name):
+        monkeypatch.setitem(amd_tuned_torch._dispatch._ORIGINALS, (F, name),
+                            getattr(F, name))
+
+    def _norm_setup(self, monkeypatch, min_rows=16, max_cols=1 << 30):
+        monkeypatch.setattr(amd_tuned_torch._dispatch, "_usable", lambda *a, **k: True)
+        monkeypatch.setattr(amd_tuned_torch._dispatch, "_TE_NORM_MIN_ROWS", min_rows)
+        monkeypatch.setattr(amd_tuned_torch._dispatch, "_TE_NORM_MAX_COLS", max_cols)
+        self._seed(monkeypatch, "rms_norm")
+        self._seed(monkeypatch, "layer_norm")
+
+    # --- norms: tall-input-and-training only ---
+
+    def test_norm_declines_below_min_rows(self, monkeypatch, te):
+        self._norm_setup(monkeypatch)
+        x = torch.randn(8, 4, requires_grad=True)   # 8 rows < 16
+        w = torch.randn(4, requires_grad=True)
+        amd_tuned_torch._patched_rms_norm(x, [4], w)
+        te.rms_norm.assert_not_called()
+
+    def test_norm_routes_at_min_rows(self, monkeypatch, te):
+        self._norm_setup(monkeypatch)
+        x = torch.randn(16, 4, requires_grad=True)  # exactly at the cutoff
+        w = torch.randn(4, requires_grad=True)
+        te.rms_norm.return_value = torch.zeros(16, 4)
+        out = amd_tuned_torch._patched_rms_norm(x, [4], w)
+        assert out is te.rms_norm.return_value
+
+    def test_norm_counts_flattened_rows_not_dim0(self, monkeypatch, te):
+        # (2, 8, 4) normalizes over the last dim -> 16 rows, not 2. Counting
+        # input.shape[0] here would decline a call that qualifies.
+        self._norm_setup(monkeypatch)
+        x = torch.randn(2, 8, 4, requires_grad=True)
+        w = torch.randn(4, requires_grad=True)
+        te.rms_norm.return_value = torch.zeros(2, 8, 4)
+        out = amd_tuned_torch._patched_rms_norm(x, [4], w)
+        assert out is te.rms_norm.return_value
+
+    def test_norm_declines_without_autograd(self, monkeypatch, te):
+        # Tall enough, but inference: TE's win is in the backward pass, so
+        # forward-only calls stay on stock however big they are.
+        self._norm_setup(monkeypatch)
+        x = torch.randn(64, 4)
+        w = torch.randn(4)
+        with torch.no_grad():
+            amd_tuned_torch._patched_rms_norm(x, [4], w)
+        te.rms_norm.assert_not_called()
+
+    def test_norm_inference_override_routes_to_te(self, monkeypatch, te):
+        self._norm_setup(monkeypatch)
+        monkeypatch.setattr(amd_tuned_torch._dispatch, "_TE_NORM_INFERENCE", True)
+        x = torch.randn(64, 4)
+        w = torch.randn(4)
+        te.rms_norm.return_value = torch.zeros(64, 4)
+        with torch.no_grad():
+            out = amd_tuned_torch._patched_rms_norm(x, [4], w)
+        assert out is te.rms_norm.return_value
+
+    def test_norm_declines_wide_hidden_size(self, monkeypatch, te):
+        # Tall enough, but a wide hidden size loses even so (16384x8192
+        # measured 0.79x on RMSNorm) -- the cap is a separate axis from the
+        # row floor, not a proxy for total size.
+        self._norm_setup(monkeypatch, max_cols=4)
+        x = torch.randn(64, 4, requires_grad=True)   # 4 cols, cap is 4 (exclusive)
+        w = torch.randn(4, requires_grad=True)
+        amd_tuned_torch._patched_rms_norm(x, [4], w)
+        te.rms_norm.assert_not_called()
+
+    def test_layer_norm_obeys_the_same_gate(self, monkeypatch, te):
+        self._norm_setup(monkeypatch)
+        x = torch.randn(8, 4, requires_grad=True)
+        w = torch.randn(4, requires_grad=True)
+        b = torch.randn(4, requires_grad=True)
+        amd_tuned_torch._patched_layer_norm(x, [4], w, b)
+        te.layer_norm.assert_not_called()
+
+    # --- attention: long, masked, training only ---
+
+    def _attn_setup(self, monkeypatch, min_work=128):
+        # 128 = 1 * 2 * 8 * 8, i.e. exactly the score matrix of the (1,2,8,4)
+        # q/k/v below -- so seq 8 clears the bar and seq 4 (32) does not.
+        monkeypatch.setattr(amd_tuned_torch._dispatch, "_usable", lambda *a, **k: True)
+        monkeypatch.setattr(amd_tuned_torch._dispatch, "_TE_ATTN_MIN_WORK", min_work)
+        monkeypatch.setattr(amd_tuned_torch._dispatch, "_TE_ATTN_MIN_HEAD_DIM", 0)
+        self._seed(monkeypatch, "scaled_dot_product_attention")
+
+    @staticmethod
+    def _qkv(seq, grad=True):
+        return [torch.randn(1, 2, seq, 4, requires_grad=grad) for _ in range(3)]
+
+    def test_attention_declines_below_min_work(self, monkeypatch, te):
+        self._attn_setup(monkeypatch)
+        q, k, v = self._qkv(4)                       # work 32 < 128
+        mask = torch.tril(torch.ones(4, 4, dtype=torch.bool))
+        amd_tuned_torch._patched_sdpa(q, k, v, attn_mask=mask)
+        te.scaled_dot_product_attention.assert_not_called()
+
+    def test_attention_routes_masked_call_at_min_work(self, monkeypatch, te):
+        self._attn_setup(monkeypatch)
+        q, k, v = self._qkv(8)
+        mask = torch.tril(torch.ones(8, 8, dtype=torch.bool))
+        te.scaled_dot_product_attention.return_value = torch.zeros(1, 2, 8, 4)
+        out = amd_tuned_torch._patched_sdpa(q, k, v, attn_mask=mask)
+        assert out is te.scaled_dot_product_attention.return_value
+
+    def test_attention_work_counts_batch_and_heads_not_just_seq(self, monkeypatch, te):
+        # Same seq as the declining case above, but 8x the batch -> 8x the
+        # score matrix, which clears the same bar. Sizing this gate off
+        # query.size(2) alone would get both of these wrong.
+        self._attn_setup(monkeypatch)
+        q, k, v = [torch.randn(8, 2, 4, 4, requires_grad=True) for _ in range(3)]
+        mask = torch.tril(torch.ones(4, 4, dtype=torch.bool))
+        te.scaled_dot_product_attention.return_value = torch.zeros(8, 2, 4, 4)
+        out = amd_tuned_torch._patched_sdpa(q, k, v, attn_mask=mask)
+        assert out is te.scaled_dot_product_attention.return_value
+
+    def test_attention_declines_unmasked_call(self, monkeypatch, te):
+        # is_causal=True is where PyTorch keeps its own flash backend and
+        # wins; only the explicit-mask path (flash disqualified) goes to TE.
+        self._attn_setup(monkeypatch)
+        q, k, v = self._qkv(8)
+        amd_tuned_torch._patched_sdpa(q, k, v, is_causal=True)
+        te.scaled_dot_product_attention.assert_not_called()
+
+    def test_attention_declines_without_autograd(self, monkeypatch, te):
+        self._attn_setup(monkeypatch)
+        q, k, v = self._qkv(8, grad=False)
+        mask = torch.tril(torch.ones(8, 8, dtype=torch.bool))
+        with torch.no_grad():
+            amd_tuned_torch._patched_sdpa(q, k, v, attn_mask=mask)
+        te.scaled_dot_product_attention.assert_not_called()
+
+    def test_attention_unmasked_override_routes_to_te(self, monkeypatch, te):
+        self._attn_setup(monkeypatch)
+        monkeypatch.setattr(amd_tuned_torch._dispatch, "_TE_ATTN_UNMASKED", True)
+        q, k, v = self._qkv(8)
+        te.scaled_dot_product_attention.return_value = torch.zeros(1, 2, 8, 4)
+        out = amd_tuned_torch._patched_sdpa(q, k, v, is_causal=True)
+        assert out is te.scaled_dot_product_attention.return_value
+
+
+class TestTeInstallSet:
+    """Which TE patches enable() installs at all (as opposed to which calls
+    they then accept -- TestTePerformanceGates above)."""
+
+    def test_enable_installs_layer_norm(self, aiter, te):
+        # Was excluded on a FORWARD-ONLY 0.71x measurement; on fwd+bwd it is
+        # a win on tall inputs (see _dispatch.py's _TE_* block), and
+        # _te_norm_worth_it() now declines the shapes that number described.
+        orig = F.layer_norm
+        was_enabled = amd_tuned_torch.is_enabled()
+        if was_enabled:
+            amd_tuned_torch.disable()
+        amd_tuned_torch.enable()
+        try:
+            assert F.layer_norm is not orig
+            assert F.layer_norm is amd_tuned_torch._patched_layer_norm
+        finally:
+            amd_tuned_torch.disable()
+            if was_enabled:
+                amd_tuned_torch.enable()
+
+    def test_enable_does_not_install_activations(self, aiter, te):
+        # gelu/silu measured 0.87x-0.99x fwd+bwd with no winning shape.
+        orig_gelu, orig_silu = F.gelu, F.silu
+        was_enabled = amd_tuned_torch.is_enabled()
+        if was_enabled:
+            amd_tuned_torch.disable()
+        amd_tuned_torch.enable()
+        try:
+            assert F.gelu is orig_gelu
+            assert F.silu is orig_silu
+        finally:
+            amd_tuned_torch.disable()
+            if was_enabled:
+                amd_tuned_torch.enable()
+
+    def test_activations_opt_in_installs_them(self, monkeypatch, aiter, te):
+        monkeypatch.setattr(amd_tuned_torch._dispatch, "_TE_ACTIVATIONS", True)
+        was_enabled = amd_tuned_torch.is_enabled()
+        if was_enabled:
+            amd_tuned_torch.disable()
+        amd_tuned_torch.enable()
+        try:
+            assert F.gelu is amd_tuned_torch._patched_gelu
+            assert F.silu is amd_tuned_torch._patched_silu
+        finally:
+            amd_tuned_torch.disable()
+            if was_enabled:
+                amd_tuned_torch.enable()
 
 
 # ---------------------------------------------------------------------------

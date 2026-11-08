@@ -1,0 +1,39 @@
+  warnings.warn(
+=== float16 ===  (speedup vs stock; err = max rel err vs fp32 over out+grads)
+rms     4096x4096  stock fwd  0.069 fwd+bwd  0.248 ms err 2.8e-04 | te_hip    fwd  1.20x fwd+bwd  0.96x err 2.8e-04 | te_triton fwd  0.30x fwd+bwd  0.33x err 2.8e-04
+rms    16384x2048  stock fwd  0.182 fwd+bwd  0.650 ms err 3.0e-04 | te_hip    fwd  0.97x fwd+bwd  1.38x err 3.0e-04 | te_triton fwd  0.91x fwd+bwd  0.70x err 3.0e-04
+rms    16384x3072  stock fwd  0.254 fwd+bwd  0.958 ms err 2.7e-04 | te_hip    fwd  0.95x fwd+bwd  1.28x err 2.7e-04 | te_triton fwd  0.91x fwd+bwd  1.12x err 2.7e-04
+rms    16384x4096  stock fwd  0.333 fwd+bwd  1.232 ms err 4.8e-04 | te_hip    fwd  0.89x fwd+bwd  1.20x err 4.8e-04 | te_triton fwd  0.90x fwd+bwd  1.21x err 4.8e-04
+rms    16384x5120  stock fwd  0.423 fwd+bwd  1.581 ms err 2.7e-04 | te_hip    fwd  0.94x fwd+bwd  1.22x err 2.7e-04 | te_triton fwd  0.94x fwd+bwd  1.48x err 2.7e-04
+rms    16384x8192  stock fwd  0.673 fwd+bwd  2.477 ms err 2.6e-04 | te_hip    fwd  0.92x fwd+bwd  0.71x err 2.6e-04 | te_triton fwd  0.99x fwd+bwd  1.48x err 2.6e-04
+rms    32768x4096  stock fwd  0.650 fwd+bwd  3.082 ms err 3.2e-04 | te_hip    fwd  0.87x fwd+bwd  1.53x err 3.2e-04 | te_triton fwd  0.86x fwd+bwd  1.83x err 3.2e-04
+rms    65536x1024  stock fwd  0.329 fwd+bwd  1.674 ms err 3.1e-04 | te_hip    fwd  0.89x fwd+bwd  1.89x err 3.1e-04 | te_triton fwd  0.93x fwd+bwd  1.70x err 3.1e-04
+rms     2048x1024  stock fwd  0.051 fwd+bwd  0.220 ms err 2.8e-04 | te_hip    fwd  1.34x fwd+bwd  1.11x err 2.8e-04 | te_triton fwd  0.23x fwd+bwd  0.33x err 2.8e-04
+layer   4096x4096  stock fwd  0.086 fwd+bwd  0.302 ms err 3.1e-04 | te_hip    fwd  1.32x fwd+bwd  1.32x err 3.1e-04 | te_triton fwd  0.30x fwd+bwd  0.25x err 3.1e-04
+layer  16384x2048  stock fwd  0.205 fwd+bwd  0.660 ms err 3.8e-04 | te_hip    fwd  1.09x fwd+bwd  1.19x err 3.8e-04 | te_triton fwd  0.81x fwd+bwd  0.68x err 3.8e-04
+layer  16384x3072  stock fwd  0.247 fwd+bwd  0.965 ms err 3.9e-04 | te_hip    fwd  0.91x fwd+bwd  0.93x err 3.9e-04 | te_triton fwd  0.78x fwd+bwd  0.83x err 3.9e-04
+layer  16384x4096  stock fwd  0.326 fwd+bwd  1.257 ms err 4.2e-04 | te_hip    fwd  0.88x fwd+bwd  1.17x err 4.2e-04 | te_triton fwd  0.94x fwd+bwd  0.86x err 4.2e-04
+layer  16384x5120  stock fwd  0.414 fwd+bwd  1.605 ms err 4.2e-04 | te_hip    fwd  0.91x fwd+bwd  1.09x err 4.2e-04 | te_triton fwd  0.98x fwd+bwd  0.92x err 4.2e-04
+layer  16384x8192  stock fwd  0.672 fwd+bwd  2.538 ms err 3.9e-04 | te_hip    fwd  0.92x fwd+bwd  1.02x err 3.9e-04 | te_triton fwd  1.02x fwd+bwd  0.96x err 3.9e-04
+layer  32768x4096  stock fwd  0.646 fwd+bwd  3.105 ms err 4.2e-04 | te_hip    fwd  0.87x fwd+bwd  1.43x err 4.2e-04 | te_triton fwd  0.98x fwd+bwd  1.32x err 4.2e-04
+layer  65536x1024  stock fwd  0.380 fwd+bwd  1.752 ms err 4.0e-04 | te_hip    fwd  1.02x fwd+bwd  1.94x err 4.0e-04 | te_triton fwd  1.09x fwd+bwd  1.45x err 4.0e-04
+layer   2048x1024  stock fwd  0.027 fwd+bwd  0.201 ms err 4.0e-04 | te_hip    fwd  0.62x fwd+bwd  0.84x err 4.0e-04 | te_triton fwd  0.05x fwd+bwd  0.21x err 4.0e-04
+=== bfloat16 ===  (speedup vs stock; err = max rel err vs fp32 over out+grads)
+rms     4096x4096  stock fwd  0.078 fwd+bwd  0.314 ms err 2.2e-03 | te_hip    fwd  1.58x fwd+bwd  1.04x err 2.2e-03 | te_triton fwd  0.32x fwd+bwd  0.31x err 2.2e-03
+rms    16384x2048  stock fwd  0.193 fwd+bwd  0.669 ms err 2.1e-03 | te_hip    fwd  1.03x fwd+bwd  1.40x err 2.1e-03 | te_triton fwd  0.80x fwd+bwd  0.72x err 2.1e-03
+rms    16384x3072  stock fwd  0.250 fwd+bwd  0.965 ms err 2.3e-03 | te_hip    fwd  0.96x fwd+bwd  1.30x err 2.3e-03 | te_triton fwd  0.89x fwd+bwd  1.29x err 2.3e-03
+rms    16384x4096  stock fwd  0.329 fwd+bwd  1.238 ms err 2.1e-03 | te_hip    fwd  0.89x fwd+bwd  0.87x err 2.1e-03 | te_triton fwd  0.68x fwd+bwd  1.33x err 2.1e-03
+rms    16384x5120  stock fwd  0.422 fwd+bwd  1.599 ms err 2.9e-03 | te_hip    fwd  0.92x fwd+bwd  1.17x err 2.9e-03 | te_triton fwd  0.93x fwd+bwd  1.51x err 2.9e-03
+rms    16384x8192  stock fwd  0.673 fwd+bwd  2.496 ms err 2.0e-03 | te_hip    fwd  0.94x fwd+bwd  1.18x err 2.0e-03 | te_triton fwd  0.99x fwd+bwd  1.49x err 2.0e-03
+rms    32768x4096  stock fwd  0.651 fwd+bwd  3.069 ms err 3.2e-03 | te_hip    fwd  0.87x fwd+bwd  1.08x err 3.2e-03 | te_triton fwd  0.93x fwd+bwd  1.82x err 3.2e-03
+rms    65536x1024  stock fwd  0.332 fwd+bwd  1.693 ms err 2.5e-03 | te_hip    fwd  0.90x fwd+bwd  1.78x err 2.5e-03 | te_triton fwd  0.93x fwd+bwd  1.49x err 2.5e-03
+rms     2048x1024  stock fwd  0.048 fwd+bwd  0.196 ms err 3.4e-03 | te_hip    fwd  1.31x fwd+bwd  0.97x err 3.4e-03 | te_triton fwd  0.16x fwd+bwd  0.17x err 3.4e-03
+layer   4096x4096  stock fwd  0.093 fwd+bwd  0.364 ms err 3.2e-03 | te_hip    fwd  1.45x fwd+bwd  1.12x err 3.2e-03 | te_triton fwd  0.38x fwd+bwd  0.34x err 3.2e-03
+layer  16384x2048  stock fwd  0.224 fwd+bwd  0.675 ms err 3.6e-03 | te_hip    fwd  1.11x fwd+bwd  1.14x err 3.6e-03 | te_triton fwd  1.04x fwd+bwd  0.85x err 3.6e-03
+layer  16384x3072  stock fwd  0.248 fwd+bwd  0.971 ms err 3.1e-03 | te_hip    fwd  0.92x fwd+bwd  1.01x err 3.1e-03 | te_triton fwd  0.98x fwd+bwd  0.94x err 3.1e-03
+layer  16384x4096  stock fwd  0.326 fwd+bwd  1.271 ms err 3.4e-03 | te_hip    fwd  0.82x fwd+bwd  1.01x err 3.4e-03 | te_triton fwd  0.99x fwd+bwd  0.98x err 3.4e-03
+layer  16384x5120  stock fwd  0.413 fwd+bwd  1.622 ms err 3.2e-03 | te_hip    fwd  0.91x fwd+bwd  0.96x err 3.2e-03 | te_triton fwd  1.03x fwd+bwd  1.05x err 3.2e-03
+layer  16384x8192  stock fwd  0.664 fwd+bwd  2.547 ms err 3.3e-03 | te_hip    fwd  0.83x fwd+bwd  1.00x err 3.3e-03 | te_triton fwd  1.04x fwd+bwd  1.06x err 3.3e-03
+layer  32768x4096  stock fwd  0.644 fwd+bwd  3.146 ms err 3.2e-03 | te_hip    fwd  0.81x fwd+bwd  1.24x err 3.2e-03 | te_triton fwd  1.00x fwd+bwd  1.51x err 3.2e-03
+layer  65536x1024  stock fwd  0.400 fwd+bwd  1.776 ms err 3.3e-03 | te_hip    fwd  1.04x fwd+bwd  1.92x err 3.3e-03 | te_triton fwd  1.23x fwd+bwd  1.67x err 3.3e-03
+layer   2048x1024  stock fwd  0.016 fwd+bwd  0.102 ms err 2.9e-03 | te_hip    fwd  0.64x fwd+bwd  0.85x err 2.9e-03 | te_triton fwd  0.13x fwd+bwd  0.17x err 2.9e-03

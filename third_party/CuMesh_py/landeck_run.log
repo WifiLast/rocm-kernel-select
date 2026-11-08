@@ -1,0 +1,3 @@
+primitives: 1294 total, 12 textured (kept as-is), 1282 untextured (simplify target)
+editable geometry: V=2003716 F=2119033
+Simplifying:   0%|          | 0/1059517 [00:00<?, ?it/s]Simplifying [thresh=1.00e-08]:   0%|          | 0/1059517 [00:00<?, ?it/s]Simplifying [thresh=1.00e-08]:   1%|          | 9185/1059517 [00:38<1:14:17, 235.63it/s]Simplifying [thresh=1.00e-07]:   1%|          | 9185/1059517 [00:38<1:14:17, 235.63it/s]Simplifying [thresh=1.00e-07]:   1%|          | 9185/1059517 [00:54<1:14:17, 235.63it/s]Simplifying [thresh=1.00e-07]:   3%|2         | 26919/1059517 [01:32<57:17, 300.41it/s] Simplifying [thresh=1.00e-06]:   3%|2         | 26919/1059517 [01:32<57:17, 300.41it/s]

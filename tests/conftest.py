@@ -96,12 +96,22 @@ import amd_tuned_torch  # noqa: E402 -- must come after the sys.modules stub abo
 import torch  # noqa: E402
 import torch.nn.functional as F  # noqa: E402
 
-# Ops amd_tuned_torch deliberately never patches: everything outside the core
-# linear/matmul/bmm/conv2d/conv3d/group_norm/attention/rms_norm/gelu/silu
-# set, plus layer_norm specifically -- it has a working patch
-# (_patched_layer_norm) that enable() just never installs, because it
-# benchmarked slower than stock on RX 7900 XTX (see benchmark.json). See the
-# module docstring in amd_tuned_torch/__init__.py for why.
+# Ops amd_tuned_torch leaves alone in the configuration these tests run in:
+# everything outside the core linear/matmul/bmm/conv2d/conv3d/group_norm/
+# attention/layer_norm/rms_norm set.
+#
+# layer_norm is in here because every test using STOCK_UNPATCHED runs
+# WITHOUT the `te` fixture, and layer_norm is a TE-backed patch -- with no
+# TransformerEngine there is nothing for enable() to install. It is no
+# longer excluded on principle: enable() does install it when TE is
+# available (see TestTeInstallSet), and the per-call shape/mode gate in
+# _te_norm_worth_it() handles the cases the old blanket exclusion was
+# standing in for. Note that "TE-backed" is no longer the whole condition:
+# enable() installs layer_norm for comfy-kitchen too (see _comfy_norm), so a
+# test asserting layer_norm stays stock has to pin _dispatch._COMFY to False
+# rather than merely omit the `te` fixture. gelu/silu are TE-backed too and likewise absent here,
+# but they additionally stay off by DEFAULT even with TE present (they
+# never measured faster than stock) -- see _dispatch.py's _TE_* block.
 STOCK_UNPATCHED = {
     (F, "layer_norm"): F.layer_norm,
     (F, "softmax"): F.softmax,
@@ -175,3 +185,18 @@ def force_eligible(monkeypatch):
     """
     monkeypatch.setattr(amd_tuned_torch._dispatch, "_usable", lambda *a, **k: True)
     monkeypatch.setattr(amd_tuned_torch._dispatch, "_grad_safe", lambda *a, **k: True)
+    # The TE-backed wrappers have a second layer of gates on top of
+    # _usable/_grad_safe: they decline calls that are merely CORRECT but
+    # measured slower than stock (short inputs, inference-only calls,
+    # unmasked attention -- see the _TE_* block in _dispatch.py). Those are
+    # a performance policy, not an eligibility check, and they would
+    # otherwise make every CPU-sized test tensor here fall back to stock,
+    # hiding the dispatch logic these tests exist to exercise. Neutralized
+    # for the same reason and in the same way as _usable/_grad_safe above;
+    # the policy itself is asserted directly in TestTePerformanceGates.
+    monkeypatch.setattr(amd_tuned_torch._dispatch, "_te_grad_live", lambda *a, **k: True)
+    monkeypatch.setattr(amd_tuned_torch._dispatch, "_TE_NORM_MIN_ROWS", 0)
+    monkeypatch.setattr(amd_tuned_torch._dispatch, "_TE_NORM_MAX_COLS", 1 << 30)
+    monkeypatch.setattr(amd_tuned_torch._dispatch, "_TE_ATTN_MIN_WORK", 0)
+    monkeypatch.setattr(amd_tuned_torch._dispatch, "_TE_ATTN_MIN_HEAD_DIM", 0)
+    monkeypatch.setattr(amd_tuned_torch._dispatch, "_TE_ATTN_UNMASKED", True)

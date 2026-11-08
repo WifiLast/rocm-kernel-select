@@ -11,8 +11,12 @@ against te_ops.py is by *how the op is reached*, not by backend:
                       left alone.
   - te_extra_ops.py   TE kernels with no stock-PyTorch equivalent to patch, or
                       whose equivalent takes a different calling convention
-                      than torch's. Nothing here is installed by enable();
-                      callers reach for these by name.
+                      than torch's. Callers reach for these by name;
+                      enable() additionally routes three stock entry
+                      points here where they measured faster (Adam/AdamW
+                      foreach step, clip_grad_norm_'s total norm,
+                      exact-p F.dropout) -- see _dispatch.py's _TE_ADAM
+                      block.
 
 WHY THESE FOUR FAMILIES
 -----------------------
@@ -43,6 +47,26 @@ equal path: norms (ck_norm_ops/fused_norm_ops/triton_kernels_ops), RoPE
 hipBLASLt that TE's rocm_gemm.cu does), and attention (flash_attn_rocwmma_ops
 has a native gfx1100 WMMA kernel; TE's would fall back to its *unfused*
 PyTorch path here, which is slower than stock).
+
+MEASURED ON THE 7900 XTX (2026-11-06, tools/bench_te_extra_ops.py,
+raw numbers in analyse/benchmarks/te_extra_ops_bench.txt)
+-----------------------------------------------------------------------
+Worth calling:
+  - fused softmax: 1.5-3.1x fwd+bwd, 1.1-4.0x fwd over torch.softmax
+    (+masked_fill); masked/causal variants gain most. Numerics at stock's
+    own fp16/bf16 error.
+  - multi_tensor_adam: 1.06-1.22x over AdamW(fused=True), 3.2-3.6x over
+    foreach=True; matches fused to <=2.4e-7.
+  - multi_tensor_l2norm: 1.2-7.5x over get_total_norm (biggest on many
+    small tensors), and accurate to ~5e-8 where stock bf16 is off by ~2e-3.
+  - dropout: 1.24-1.32x fwd+bwd, saved mask 8x smaller. Caveat: the keep
+    threshold is 8-bit, so p is effectively round(p*256)/256 (0.1 -> 0.0977)
+    while survivors are still scaled by 1/(1-p) -- a ~0.26% upward bias.
+  - pad_rows: 3.2x over split+F.pad+cat.
+Not worth calling (stock wins): multi_tensor_sgd (0.87-0.90x vs
+SGD(fused=True); also rejects bf16 params), multi_tensor_scale (0.94-1.00x),
+thd_to_bshd / bshd_to_thd (0.02-0.06x vs index_copy_/index_select with a
+cached index), swap_first_dims (0.26x vs transpose().contiguous()).
 
 WAVE SIZE
 ---------
@@ -120,13 +144,26 @@ _noop_flag_cache: dict = {}
 
 
 def _noop_flag(device: torch.device) -> torch.Tensor:
-    """A cached zero int32 buffer, the "no overflow found" value."""
+    """A cached zero int32 buffer, the "no overflow found" value.
+
+    READ-ONLY use only (adam, sgd). The l2norm and scale kernels WRITE 1 into
+    the flag when they meet an inf/nan (l2norm.hip "blindly fire off a
+    write"), and sgd.hip returns early while it is set -- so handing this
+    shared buffer to a writer once made every later default-flag SGD step a
+    silent no-op for the rest of the process (reproduced 2026-11-06). Writers
+    get _fresh_noop_flag() instead.
+    """
     key = (device.type, device.index)
     flag = _noop_flag_cache.get(key)
     if flag is None:
         flag = torch.zeros(1, dtype=torch.int32, device=device)
         _noop_flag_cache[key] = flag
     return flag
+
+
+def _fresh_noop_flag(device: torch.device) -> torch.Tensor:
+    """A new zero flag for the kernels that may set it (l2norm, scale)."""
+    return torch.zeros(1, dtype=torch.int32, device=device)
 
 
 def _align_tensor_lists(tensor_lists: Sequence[Sequence[torch.Tensor]]):
@@ -285,14 +322,17 @@ def multi_tensor_l2norm(
     if aligned is None:
         empty = torch.zeros(1, device="cuda" if torch.cuda.is_available() else "cpu")
         return empty, None
-    flag = _noop_flag(aligned[0][0].device) if noop_flag is None else noop_flag
+    flag = _fresh_noop_flag(aligned[0][0].device) if noop_flag is None else noop_flag
     if inv_scale is None:
         norm, per_tensor_norm = tex.multi_tensor_l2norm(_CHUNK_SIZE, flag, aligned, per_tensor)
     else:
         norm, per_tensor_norm = tex.multi_tensor_unscale_l2norm(
             _CHUNK_SIZE, flag, aligned, inv_scale, per_tensor
         )
-    return norm, (per_tensor_norm if per_tensor else None)
+    # The non-per-tensor binding returns g_l2norm_cache.ret_dev -- ONE device
+    # buffer reused by every call -- so without a copy the norm handed back
+    # here changed under the caller on the next call (31.6 read back as 63.2).
+    return norm.clone(), (per_tensor_norm if per_tensor else None)
 
 
 def multi_tensor_scale(
@@ -313,7 +353,7 @@ def multi_tensor_scale(
     aligned = _align_tensor_lists([list(inputs), list(outputs)])
     if aligned is None:
         return
-    flag = _noop_flag(aligned[0][0].device) if noop_flag is None else noop_flag
+    flag = _fresh_noop_flag(aligned[0][0].device) if noop_flag is None else noop_flag
     tex.multi_tensor_scale(_CHUNK_SIZE, flag, aligned, scale)
 
 
@@ -396,6 +436,23 @@ def kernel_available(
     return True
 
 
+def _owned_grad(grad_output: torch.Tensor) -> torch.Tensor:
+    """A private contiguous copy of grad_output for the softmax backward kernels.
+
+    All four tex.scaled_*softmax_backward bindings run the kernel IN PLACE on
+    `output_grad_.contiguous()` and return that tensor (csrc/extensions/
+    softmax.cpp) -- for an already-contiguous grad, that is the caller's own
+    buffer. Passing autograd's grad_output straight through therefore
+    overwrote it: `y.backward(g)` left g holding dL/dx, and any other consumer
+    of the same gradient (a reused grad tensor, a branch that also reads it)
+    saw garbage. Measured before this copy: TE-vs-fp32 grad rel err 1.2-5400x
+    against 3e-4 for the raw kernel on a fresh buffer. One copy (~a bf16/fp16
+    read+write of the score tensor) is the price of not aliasing; TE's own
+    ScaledSoftmax autograd functions have the same aliasing.
+    """
+    return grad_output.clone(memory_format=torch.contiguous_format)
+
+
 class _ScaledSoftmaxFn(torch.autograd.Function):
     """Unmasked softmax(scale * x) over a 4D score tensor."""
 
@@ -413,7 +470,7 @@ class _ScaledSoftmaxFn(torch.autograd.Function):
         tex = _tex()
         # The kernel needs the softmax *output*, not the input -- softmax's
         # Jacobian is expressible entirely in terms of its own result.
-        return tex.scaled_softmax_backward(grad_output, out, ctx.scale), None
+        return tex.scaled_softmax_backward(_owned_grad(grad_output), out, ctx.scale), None
 
 
 class _ScaledMaskedSoftmaxFn(torch.autograd.Function):
@@ -433,7 +490,7 @@ class _ScaledMaskedSoftmaxFn(torch.autograd.Function):
         tex = _tex()
         # The mask is not needed in backward: masked positions are already
         # exactly zero in `out`, so their gradient falls out as zero too.
-        return tex.scaled_masked_softmax_backward(grad_output, out, ctx.scale), None, None
+        return tex.scaled_masked_softmax_backward(_owned_grad(grad_output), out, ctx.scale), None, None
 
 
 class _ScaledUpperTriangMaskedSoftmaxFn(torch.autograd.Function):
@@ -456,7 +513,7 @@ class _ScaledUpperTriangMaskedSoftmaxFn(torch.autograd.Function):
         (out,) = ctx.saved_tensors
         tex = _tex()
         return (
-            tex.scaled_upper_triang_masked_softmax_backward(grad_output, out, ctx.scale),
+            tex.scaled_upper_triang_masked_softmax_backward(_owned_grad(grad_output), out, ctx.scale),
             None,
         )
 
@@ -480,7 +537,7 @@ class _ScaledAlignedCausalMaskedSoftmaxFn(torch.autograd.Function):
         (out,) = ctx.saved_tensors
         tex = _tex()
         return (
-            tex.scaled_aligned_causal_masked_softmax_backward(grad_output, out, ctx.scale),
+            tex.scaled_aligned_causal_masked_softmax_backward(_owned_grad(grad_output), out, ctx.scale),
             None,
         )
 
@@ -711,15 +768,38 @@ def unpad_rows(
     )
 
 
+_extension_initialized = False
+
+
+def _ensure_extension_init(tex, device: torch.device) -> None:
+    """Run TE's one-time C++ init_extension() while holding the GIL.
+
+    init_extension() (pybind.cpp) imports TE's Python quantizer modules the
+    first time any binding that needs it runs. Most such bindings keep the
+    GIL, but swap_first_dims is registered with
+    py::call_guard<py::gil_scoped_release>, so when it is the FIRST TE call
+    in the process that import runs without the GIL and segfaults in
+    PyImport_Import (gdb, 2026-11-06). Any GIL-holding binding that calls
+    init_extension() fixes it for the rest of the process; a one-element
+    tex.gelu is the cheapest one.
+    """
+    global _extension_initialized
+    if not _extension_initialized:
+        tex.gelu(torch.zeros(1, device=device, dtype=torch.float32), None)
+        _extension_initialized = True
+
+
 def swap_first_dims(tensor: torch.Tensor, out: Optional[torch.Tensor] = None) -> torch.Tensor:
     """Swap dims 0 and 1 with an actual copy, not a stride change.
 
     torch's .transpose(0, 1) is free but leaves a non-contiguous tensor that
     the next kernel may have to materialize anyway, often less efficiently
-    than this does. Use it when the consumer needs contiguity.
+    than this does. Use it when the consumer needs contiguity. Measured on
+    the 7900 XTX it is 0.26x of transpose(0, 1).contiguous(), so prefer that.
     """
     tex = _tex()
-    return tex.swap_first_dims(tensor, out)
+    _ensure_extension_init(tex, tensor.device)
+    return tex.swap_first_dims(tensor, out=out)  # out is keyword-only in the binding
 
 
 def copy_to_kv_cache(

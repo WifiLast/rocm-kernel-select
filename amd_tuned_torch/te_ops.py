@@ -64,9 +64,30 @@ import torch
 _TE_ENABLED_ENV = os.environ.get("AMD_TUNED_TORCH_ENABLE_TE", "0") not in ("0", "", "false", "False")
 
 if _TE_ENABLED_ENV:
+    # TE JIT-compiles its "tuned" norm/softmax kernels through hipRTC, feeding
+    # the compile $ROCM_PATH/include while stamping it with the HIP version of
+    # the *runtime* that's loaded. Those two only agree if TE was built against
+    # the same ROCm the loaded HIP runtime comes from; here they don't (system
+    # ROCm 7.14 headers vs torch's HIP 7.2 runtime), and every RTC compile dies
+    # with HIPRTC_ERROR_COMPILATION inside hip_bf16.h -- which surfaces as a
+    # RuntimeError from the first layer_norm/rms_norm/attention call, i.e. TE
+    # would be "available" but fall back to stock on every single call.
+    # NVTE_DISABLE_NVRTC (see common/util/rtc_hip.cpp) keeps TE on its
+    # precompiled kernels, which work. setdefault, not a plain assignment:
+    # NVTE_DISABLE_NVRTC=0 re-enables the JIT path on a machine whose ROCm
+    # headers do match its runtime.
+    os.environ.setdefault("NVTE_DISABLE_NVRTC", "1")
+
     try:
-        import transformer_engine_torch as tex
+        # `transformer_engine.pytorch` MUST come first. TE no longer installs a
+        # top-level `transformer_engine_torch` module: the binding .so lives
+        # inside the transformer_engine package directory, and
+        # transformer_engine.common.load_framework_extension("torch") is what
+        # loads it and registers it under that name in sys.modules. Importing
+        # it first raises ModuleNotFoundError, which this except clause would
+        # swallow into a permanent available() == False.
         import transformer_engine.pytorch as te
+        import transformer_engine_torch as tex
         from transformer_engine.pytorch.constants import TE_DType
 
         _TE_AVAILABLE = True
@@ -149,9 +170,63 @@ class _RMSNormFn(torch.autograd.Function):
         return dx.view(ctx.input_dims), dw, None
 
 
-def rms_norm(input_, normalized_shape, weight, eps=None):
+# TE's experimental ROCm Triton RMSNorm (what NVTE_USE_RMSNORM_TRITON=1
+# switches on inside TE's own modules; that env var never reaches the direct
+# tex.* calls above, so it is wired in here explicitly). Same signatures as
+# tex.rmsnorm_fwd/bwd. Measured fwd+bwd vs stock on the 7900 XTX
+# (tools/bench_te_triton_norms.py, analyse/benchmarks/te_triton_norms_bench.txt):
+# 1.21-1.82x at >= 16384 rows x 4096-8192 hidden, ahead of the hipified kernel
+# there; behind it at hidden <= 3072, and 0.17-0.33x on small inputs (Python
+# launch overhead in TE's wrapper). TE's Triton LayerNorm was mixed against
+# the hipified one, so it is not used. _dispatch decides which shapes get it.
+_triton_rms = None  # (fwd, bwd) once imported; False if the import failed
+
+
+def _triton_rms_fns():
+    global _triton_rms
+    if _triton_rms is None:
+        try:
+            from transformer_engine.pytorch.triton_kernels.norms_common import (
+                te_rmsnorm_fwd_triton, te_rmsnorm_bwd_triton)
+            _triton_rms = (te_rmsnorm_fwd_triton, te_rmsnorm_bwd_triton)
+        except Exception:  # noqa: BLE001 -- no triton / old TE: stay on HIP
+            _triton_rms = False
+    return _triton_rms
+
+
+def triton_rms_norm_available() -> bool:
+    return _TE_AVAILABLE and bool(_triton_rms_fns())
+
+
+class _RMSNormTritonFn(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, input_, weight, eps):
+        fwd, _ = _triton_rms_fns()
+        input_dims = input_.shape
+        inner_dim = weight.numel()
+        x = input_.contiguous().view(-1, inner_dim)
+        w = weight.contiguous().view(inner_dim)
+        y, _, rstdevs = fwd(x, w, eps, None, None, TE_DType[weight.dtype], 0, False)
+        ctx.save_for_backward(x, rstdevs, w)
+        ctx.input_dims = input_dims
+        return y.view(input_dims)
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        _, bwd = _triton_rms_fns()
+        x, rstdevs, w = ctx.saved_tensors
+        dy = grad_output.contiguous().view(x.size())
+        dx, dw = bwd(dy, x, rstdevs, w, 0, False)
+        return dx.view(ctx.input_dims), dw, None
+
+
+def rms_norm(input_, normalized_shape, weight, eps=None, backend: str = "hip"):
+    """backend="hip" (hipified TE kernel) or "triton" (TE's ROCm Triton
+    kernel; falls back to "hip" when it cannot be imported)."""
     if eps is None:
         eps = torch.finfo(input_.dtype).eps
+    if backend == "triton" and triton_rms_norm_available():
+        return _RMSNormTritonFn.apply(input_, weight, eps)
     return _RMSNormFn.apply(input_, weight, eps)
 
 

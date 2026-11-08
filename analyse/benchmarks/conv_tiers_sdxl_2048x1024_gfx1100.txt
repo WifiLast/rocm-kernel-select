@@ -1,0 +1,73 @@
+OMP: Info #155: KMP_AFFINITY: Initial OS proc set respected: 0-7
+OMP: Info #216: KMP_AFFINITY: decoding x2APIC ids.
+OMP: Info #157: KMP_AFFINITY: 8 available OS procs
+OMP: Info #158: KMP_AFFINITY: Uniform topology
+OMP: Info #289: KMP_AFFINITY: topology layer "LL cache" is equivalent to "socket".
+OMP: Info #289: KMP_AFFINITY: topology layer "L3 cache" is equivalent to "socket".
+OMP: Info #289: KMP_AFFINITY: topology layer "L2 cache" is equivalent to "core".
+OMP: Info #289: KMP_AFFINITY: topology layer "L1 cache" is equivalent to "core".
+OMP: Info #191: KMP_AFFINITY: 1 socket x 4 cores/socket x 2 threads/core (4 total cores)
+OMP: Info #218: KMP_AFFINITY: OS proc to physical thread map:
+OMP: Info #172: KMP_AFFINITY: OS proc 0 maps to socket 0 core 0 thread 0 
+OMP: Info #172: KMP_AFFINITY: OS proc 4 maps to socket 0 core 0 thread 1 
+OMP: Info #172: KMP_AFFINITY: OS proc 1 maps to socket 0 core 1 thread 2 
+OMP: Info #172: KMP_AFFINITY: OS proc 5 maps to socket 0 core 1 thread 3 
+OMP: Info #172: KMP_AFFINITY: OS proc 2 maps to socket 0 core 2 thread 4 
+OMP: Info #172: KMP_AFFINITY: OS proc 6 maps to socket 0 core 2 thread 5 
+OMP: Info #172: KMP_AFFINITY: OS proc 3 maps to socket 0 core 3 thread 6 
+OMP: Info #172: KMP_AFFINITY: OS proc 7 maps to socket 0 core 3 thread 7 
+OMP: Info #254: KMP_AFFINITY: pid 148584 tid 148584 thread 0 bound to OS proc set 0
+I0917 18:07:13.485000 148584 site-packages/torch/_inductor/config.py:1491] compile_threads set to 1
+[aiter] import [module_aiter_core] under /mnt/data/miniconda3/envs/py310_amd/lib/python3.10/site-packages/aiter/jit/module_aiter_core.so
+/home/wiffzack/optimiert/amd_tools/source/cmp_ext_turing/amd_tuned_torch/_opt_in_tiers.py:588: UserWarning: amd_tuned_torch.enable_triton_kernels_rmsnorm(): triton_kernels not installed, F.rms_norm left as-is
+  warnings.warn(
+/mnt/data/stable-diffusion-webui-amdgpu/log/miopen/miopen-conv-20260917-165449.log: 3972 forward convs over 72 distinct shapes
+
+  shape                              calls    stock       ck   native winner     gain  stock solver
+  2x1280x32x16->1280 k3s1              450    0.524    0.545    1.017 stock     1.00x  miopenSp3AsmConv_v30_3_1_gfx11_fp1
+  2x1280x64x32->1280 k3s1              375    1.372    1.718    3.666 stock     1.00x  miopenSp3AsmConv_v30_3_1_gfx11_fp1
+  2x320x128x64->320 k3s1               315    0.457    0.556    1.052 stock     1.00x  miopenSp3AsmConv_v30_3_1_gfx11_fp1
+  2x640x64x32->640 k3s1                270    0.555    0.506    1.031 stock     1.10x  miopenSp3AsmConv_v30_3_1_gfx11_fp1
+  2x640x128x64->640 k3s1               243    1.254    1.654    3.400 stock     1.00x  miopenSp3AsmConv_v30_3_1_gfx11_fp1
+  2x320x256x128->320 k3s1              231    1.272    2.218    4.150 stock     1.00x  miopenSp3AsmConv_v30_3_1_gfx11_fp1
+  2x2560x32x16->1280 k3s1               90    0.659    1.086    1.847 stock     1.00x  miopenSp3AsmConv_v30_3_1_gfx11_fp1
+  2x2560x32x16->1280 k1s1               90    0.235    0.241    0.233 None      1.01x  
+  2x640x128x64->320 k3s1                90    0.632    1.045    2.081 stock     1.00x  miopenSp3AsmConv_v30_3_1_gfx11_fp1
+  2x640x128x64->320 k1s1                90    0.203    0.320    0.279 None      1.00x  
+  2x2560x64x32->1280 k3s1               66    2.363    3.627    7.571 stock     1.00x  miopenSp3AsmConv_v30_3_1_gfx11_fp1
+  2x2560x64x32->1280 k1s1               66    0.444    1.121    0.942 None      1.00x  
+  2x640x256x128->320 k3s1               66    2.383    4.069    8.585 stock     1.00x  miopenSp3AsmConv_v30_3_1_gfx11_fp1
+  2x640x256x128->320 k1s1               66    0.527    1.278    1.149 None      1.00x  
+  2x320x64x32->640 k3s1                 45    0.213    0.344    0.510 stock     1.00x  miopenSp3AsmConv_v30_3_1_gfx11_fp1
+  2x320x64x32->640 k1s1                 45    0.094    0.164    0.280 None      1.00x  
+  2x640x32x16->1280 k3s1                45    0.334    0.283    0.515 stock     1.18x  miopenSp3AsmConv_v30_3_1_gfx11_fp1
+  2x640x32x16->1280 k1s1                45    0.065    0.070    0.078 None      1.00x  
+  2x1920x32x16->1280 k3s1               45    0.660    0.938    1.481 stock     1.00x  miopenSp3AsmConv_v30_3_1_gfx11_fp1
+  2x1920x32x16->1280 k1s1               45    0.107    0.166    0.180 None      1.00x  
+
+  call-weighted conv time: stock 2242.0 ms, best-tier 2226.1 ms (1.01x available)
+wrote .opt_work/conv_tiers.json
+I0917 18:07:28.808000 148584 site-packages/torch/_dynamo/eval_frame.py:837] TorchDynamo attempted to trace the following frames: [
+I0917 18:07:28.808000 148584 site-packages/torch/_dynamo/eval_frame.py:837] 
+I0917 18:07:28.808000 148584 site-packages/torch/_dynamo/eval_frame.py:837] ]
+I0917 18:07:28.826000 148584 site-packages/torch/_dynamo/utils.py:925] TorchDynamo compilation metrics:
+I0917 18:07:28.826000 148584 site-packages/torch/_dynamo/utils.py:925] Function    Runtimes (s)
+I0917 18:07:28.826000 148584 site-packages/torch/_dynamo/utils.py:925] ----------  --------------
+V0917 18:07:28.827000 148584 site-packages/torch/fx/experimental/symbolic_shapes.py:245] lru_cache_stats constrain_symbol_range: CacheInfo(hits=0, misses=0, maxsize=None, currsize=0)
+V0917 18:07:28.827000 148584 site-packages/torch/fx/experimental/symbolic_shapes.py:245] lru_cache_stats guard_or_defer_runtime_assert: CacheInfo(hits=0, misses=0, maxsize=256, currsize=0)
+V0917 18:07:28.827000 148584 site-packages/torch/fx/experimental/symbolic_shapes.py:245] lru_cache_stats _inner_evaluate_expr: CacheInfo(hits=0, misses=0, maxsize=256, currsize=0)
+V0917 18:07:28.827000 148584 site-packages/torch/fx/experimental/symbolic_shapes.py:245] lru_cache_stats _simplify_floor_div: CacheInfo(hits=0, misses=0, maxsize=None, currsize=0)
+V0917 18:07:28.827000 148584 site-packages/torch/fx/experimental/symbolic_shapes.py:245] lru_cache_stats _maybe_guard_rel: CacheInfo(hits=0, misses=0, maxsize=256, currsize=0)
+V0917 18:07:28.827000 148584 site-packages/torch/fx/experimental/symbolic_shapes.py:245] lru_cache_stats _find: CacheInfo(hits=0, misses=0, maxsize=None, currsize=0)
+V0917 18:07:28.827000 148584 site-packages/torch/fx/experimental/symbolic_shapes.py:245] lru_cache_stats has_guarding_hint: CacheInfo(hits=0, misses=0, maxsize=256, currsize=0)
+V0917 18:07:28.827000 148584 site-packages/torch/fx/experimental/symbolic_shapes.py:245] lru_cache_stats guarding_hint_or_throw: CacheInfo(hits=0, misses=0, maxsize=256, currsize=0)
+V0917 18:07:28.827000 148584 site-packages/torch/fx/experimental/symbolic_shapes.py:245] lru_cache_stats size_hint: CacheInfo(hits=0, misses=0, maxsize=256, currsize=0)
+V0917 18:07:28.827000 148584 site-packages/torch/fx/experimental/symbolic_shapes.py:245] lru_cache_stats simplify: CacheInfo(hits=0, misses=0, maxsize=None, currsize=0)
+V0917 18:07:28.827000 148584 site-packages/torch/fx/experimental/symbolic_shapes.py:245] lru_cache_stats _update_divisible: CacheInfo(hits=0, misses=0, maxsize=None, currsize=0)
+V0917 18:07:28.828000 148584 site-packages/torch/fx/experimental/symbolic_shapes.py:245] lru_cache_stats replace: CacheInfo(hits=0, misses=0, maxsize=None, currsize=0)
+V0917 18:07:28.828000 148584 site-packages/torch/fx/experimental/symbolic_shapes.py:245] lru_cache_stats _maybe_evaluate_static: CacheInfo(hits=0, misses=0, maxsize=None, currsize=0)
+V0917 18:07:28.828000 148584 site-packages/torch/fx/experimental/symbolic_shapes.py:245] lru_cache_stats get_implications: CacheInfo(hits=0, misses=0, maxsize=None, currsize=0)
+V0917 18:07:28.828000 148584 site-packages/torch/fx/experimental/symbolic_shapes.py:245] lru_cache_stats get_axioms: CacheInfo(hits=0, misses=0, maxsize=None, currsize=0)
+V0917 18:07:28.828000 148584 site-packages/torch/fx/experimental/symbolic_shapes.py:245] lru_cache_stats _maybe_evaluate_static_worker: CacheInfo(hits=0, misses=0, maxsize=None, currsize=0)
+V0917 18:07:28.828000 148584 site-packages/torch/fx/experimental/symbolic_shapes.py:245] lru_cache_stats safe_expand: CacheInfo(hits=0, misses=0, maxsize=256, currsize=0)
+V0917 18:07:28.828000 148584 site-packages/torch/fx/experimental/symbolic_shapes.py:245] lru_cache_stats uninteresting_files: CacheInfo(hits=0, misses=0, maxsize=None, currsize=0)

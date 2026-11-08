@@ -499,7 +499,9 @@ class TestSequenceLayout:
         x = torch.zeros(2, 3, 4)
         out = torch.zeros(3, 2, 4)
         te_extra_ops.swap_first_dims(x, out)
-        fake_tex.swap_first_dims.assert_called_once_with(x, out)
+        # keyword: the real binding declares `out` after py::kw_only(), so a
+        # positional out raised TypeError on hardware.
+        fake_tex.swap_first_dims.assert_called_once_with(x, out=out)
 
 
 class TestCopyToKvCache:

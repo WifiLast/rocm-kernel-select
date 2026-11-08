@@ -116,6 +116,7 @@ not this one.
 from __future__ import annotations
 
 import os
+from functools import lru_cache
 from math import ceil, floor
 from typing import Iterable, Optional, Tuple, Union
 
@@ -124,7 +125,7 @@ import torch.nn.functional as F
 from torch import Tensor
 from torch.fft import irfftn as _torch_irfftn, rfftn as _torch_rfftn
 
-from . import kernel_select, rocfft_ops
+from . import kernel_select, rocfft_ops, vkfft_ops
 
 
 def available() -> bool:
@@ -208,7 +209,39 @@ def _rocfft_usable(x: Tensor, dim: Tuple[int, ...], *, grad_operands=()) -> bool
     return tuple(d % ndim for d in dim) == tuple(range(ndim - len(dim), ndim))
 
 
-def _contest(kind: str, key, rocfft_thunk, torch_thunk):
+_VKFFT_CONTEST = _env_flag("AMD_TUNED_TORCH_FFTCONV_VKFFT", default="0")
+
+
+def vkfft_contest_enabled() -> bool:
+    """True only if AMD_TUNED_TORCH_FFTCONV_VKFFT is set on. OFF by default,
+    unlike every other tier gate in this package, and the asymmetry is the
+    point: VkFFT's OpenCL backend cannot address a torch tensor (see
+    vkfft_ops' module docstring), so every candidate call copies the data
+    device->host->device. Measured end to end that is 10-100x slower than
+    rocFFT on every shape tried, so admitting it to the contest by default
+    would buy nothing but measurement time, paid once per distinct shape.
+    The flag exists so that claim can be re-measured on demand rather than
+    taken on faith -- turn it on and kernel_select decides per shape."""
+    return _VKFFT_CONTEST
+
+
+def _vkfft_thunk(fn_name: str, *args, **kwargs):
+    """A (name, thunk) entry for the contest, or None when the tier is off
+    or unavailable. Declines (returns None) rather than raising on any
+    failure, matching every other kernel_select candidate."""
+    if not (_VKFFT_CONTEST and vkfft_ops.available()):
+        return None
+
+    def _thunk():
+        try:
+            return getattr(vkfft_ops, fn_name)(*args, **kwargs)
+        except (RuntimeError, ValueError, TypeError):
+            return None
+
+    return ("vkfft", _thunk)
+
+
+def _contest(kind: str, key, rocfft_thunk, torch_thunk, vkfft_entry=None):
     """Run `rocfft_thunk` vs `torch_thunk` through kernel_select's
     measure-once-cache-the-winner contest, falling back to torch.fft when
     the contest is disabled (AMD_TUNED_TORCH_MEASURE_KERNELS=0) or declines.
@@ -229,14 +262,32 @@ def _contest(kind: str, key, rocfft_thunk, torch_thunk):
         out = rocfft_thunk()
         if out is not None:
             return out
+    elif won == "vkfft" and vkfft_entry is not None:
+        out = vkfft_entry[1]()
+        if out is not None:
+            return out
     elif won is None:
-        out = kernel_select.pick_key(kind, key, [
-            ("rocfft", rocfft_thunk),
-            ("torch", torch_thunk),
-        ])
+        candidates = [("rocfft", rocfft_thunk)]
+        if vkfft_entry is not None:
+            candidates.append(vkfft_entry)
+        # torch stays LAST: it is the reference every other candidate is
+        # verified against (kernel_select._contest reads candidates[-1]).
+        candidates.append(("torch", torch_thunk))
+        out = kernel_select.pick_key(kind, key, candidates,
+                                      tolerance=fftconv_tolerance(x_dtype(key)))
         if out is not None:
             return out
     return torch_thunk()
+
+
+def x_dtype(key):
+    """The dtype out of a contest key built by rfftn/irfftn below (both put
+    it first), for picking the verification tolerance. VkFFT is a different
+    FFT implementation than rocFFT rather than the same library reached two
+    ways, so unlike the rocfft-vs-torch pair its output is close but not
+    bit-identical -- which is exactly what fftconv_tolerance's looser bar is
+    for."""
+    return key[0] if key and isinstance(key[0], torch.dtype) else torch.float32
 
 
 def rfftn(x: Tensor, dim: Tuple[int, ...]) -> Tensor:
@@ -256,7 +307,9 @@ def rfftn(x: Tensor, dim: Tuple[int, ...]) -> Tensor:
         except (rocfft_ops.RocfftError, TypeError, ValueError):
             return None
 
-    return _contest("fftconv_rfftn", (x.dtype, tuple(x.shape), tuple(dim)), _rocfft, _torch)
+    return _contest("fftconv_rfftn", (x.dtype, tuple(x.shape), tuple(dim)),
+                    _rocfft, _torch,
+                    vkfft_entry=_vkfft_thunk("rfftn", x, dim=tuple(dim)))
 
 
 def irfftn(x: Tensor, dim: Tuple[int, ...], s: Optional[Tuple[int, ...]] = None) -> Tensor:
@@ -285,7 +338,126 @@ def irfftn(x: Tensor, dim: Tuple[int, ...], s: Optional[Tuple[int, ...]] = None)
             return None
 
     return _contest("fftconv_irfftn", (x.dtype, tuple(x.shape), tuple(dim), tuple(s)),
-                    _rocfft, _torch)
+                    _rocfft, _torch,
+                    vkfft_entry=_vkfft_thunk("irfftn", x, s=tuple(s), dim=tuple(dim)))
+
+
+# ---------------------------------------------------------------------------
+# TRANSFORM-LENGTH PADDING -- making an ARBITRARY signal length fast, not
+# merely legal.
+#
+# Non-power-of-2 lengths have always been CORRECT here: torch.fft/rocFFT
+# factor any length into mixed-radix passes and fall back to Bluestein for
+# a large prime factor, so `fft_conv` already accepted 63, 997, (31,17),
+# (7,9,11) and so on with no special-casing. What they are not is FAST --
+# a length whose factorisation rocFFT has no good radix kernel for costs
+# several times a nearby smooth length on gfx1100 (16381 and 15625 both
+# measured ~3-4x a padded 16384).
+#
+# ZERO-PADDING THE TRANSFORM UP TO A SMOOTHER LENGTH IS FREE OF SEMANTIC
+# RISK, which is what makes this a legitimate thing to do behind the
+# caller's back. `fft_conv` computes a CIRCULAR correlation of length N and
+# keeps only outputs [0, signal_size - K], which are exactly the taps whose
+# support never wraps; padding the signal with zeros to N' > N leaves every
+# retained tap's support untouched (it only adds further valid taps past
+# the crop) and `signal_size` is captured BEFORE any of this, so the crop is
+# unmoved. Verified over 48 shape/stride/padding/groups combinations x 6 pad
+# amounts: bit-for-bit within fp32 rounding of the unpadded result. The
+# function already relied on this property in the small -- the pre-existing
+# odd-length `% 2` pad below is the same trick with a fixed target of "even".
+#
+# WHICH smooth length is NOT a decision this module makes statically.
+# Measurement on gfx1100 put no policy on top uniformly -- next-power-of-2
+# won for 15625, 7-smooth for 16386, 5-smooth for 17011 -- and for lengths
+# that are already smooth, padding is pure loss (a bigger transform for
+# identical output). That is the same shape of answer that made rfftn/irfftn
+# above a contest rather than a rule, so this is one too: the policies below
+# are candidates, `_ORIGINAL_LEN` (pad nothing beyond the historical
+# odd->even step) is the reference they must beat, and kernel_select
+# measures once per shape and caches the winner. Set
+# AMD_TUNED_TORCH_FFTCONV_SMOOTH_LEN=0 to skip the contest and always take
+# the reference.
+# ---------------------------------------------------------------------------
+_FFTCONV_SMOOTH_LEN = _env_flag("AMD_TUNED_TORCH_FFTCONV_SMOOTH_LEN", default="1")
+
+# Name -> allowed prime factors. 2 must be in every one of these: the
+# next-power-of-2 upper bound `_next_smooth_len` starts its search from
+# assumes it, and an odd target would fight the `% 2` even-length pad.
+_SMOOTH_POLICIES = (
+    ("pow2", (2,)),
+    ("5smooth", (2, 3, 5)),
+    ("7smooth", (2, 3, 5, 7)),
+)
+_ORIGINAL_LEN = "original"
+
+# Below this many spatial positions, skip the contest and take the unpadded
+# transform. The contest is not free -- it runs the convolution once per
+# surviving policy to time it, plus once more for the reference to verify
+# against -- and a transform this small is dominated by launch overhead that
+# a smoother length does not remove, so there is nothing for the measurement
+# to find. Same "don't contest what can't win" posture as
+# _FFTCONV_CONV3D_MIN_POSITIONS in __init__.py, and likewise a guess rather
+# than a measurement: override per workload if a shape proves otherwise.
+_FFTCONV_SMOOTH_MIN_POSITIONS = int(
+    os.environ.get("AMD_TUNED_TORCH_FFTCONV_SMOOTH_MIN_POSITIONS", "4096")
+)
+
+
+def _positions(sizes: Tuple[int, ...]) -> int:
+    """Product of the transform extents -- the spatial volume one transform
+    covers, ignoring batch and channels."""
+    total = 1
+    for s in sizes:
+        total *= int(s)
+    return total
+
+
+def smooth_len_enabled() -> bool:
+    """True unless AMD_TUNED_TORCH_FFTCONV_SMOOTH_LEN=0. Read once at import
+    time, same posture as every other env-var gate in this module."""
+    return _FFTCONV_SMOOTH_LEN
+
+
+@lru_cache(maxsize=4096)
+def _next_smooth_len(n: int, radices: Tuple[int, ...]) -> int:
+    """Smallest `m >= n` whose prime factorisation uses only `radices`.
+
+    Cached because it is called per conv call per spatial axis and the
+    distinct (n, radices) pairs a process sees are few.
+
+    The obvious "increment until smooth" loop is not viable here -- for
+    radices=(2,) it walks ~16k integers to get from 16385 to 32768, on
+    every call, in Python. This instead enumerates the smooth numbers
+    directly by DFS over exponent tuples, seeded with the next power of two
+    as an upper bound (always valid: 2 is in every policy) so branches that
+    can no longer improve on the best candidate are cut."""
+    if n <= 1:
+        return 1
+    best = 1 << (n - 1).bit_length()  # next power of 2 >= n; always smooth
+    if radices == (2,):
+        return best
+
+    def walk(i: int, cur: int) -> None:
+        nonlocal best
+        if cur >= n:
+            if cur < best:
+                best = cur
+            return
+        if i == len(radices):
+            return
+        v = cur
+        while v < best:
+            walk(i + 1, v)
+            v *= radices[i]
+
+    walk(0, 1)
+    return best
+
+
+def _smooth_sizes(sizes: Tuple[int, ...], radices: Tuple[int, ...]) -> Tuple[int, ...]:
+    """Per-axis `_next_smooth_len`. `sizes` are the transform extents of the
+    already-padded signal, in tensor order."""
+    return tuple(_next_smooth_len(int(s), radices) for s in sizes)
 
 
 def to_ntuple(val: Union[int, Iterable[int]], n: int) -> Tuple[int, ...]:
@@ -371,6 +543,63 @@ def complex_matmul(a: Tensor, b: Tensor, groups: int = 1) -> Tensor:
     return out.reshape(n, cout, *freq)
 
 
+def _length_contest(run, signal: Tensor, kernel: Tensor,
+                    base_sizes: Tuple[int, ...], groups: int,
+                    stride_: Tuple[int, ...]) -> Tensor:
+    """Pick the transform extents for this shape by measuring, and cache the
+    winner -- `run(fft_sizes)` computes the whole convolution at those
+    extents. See the TRANSFORM-LENGTH PADDING comment above for why every
+    candidate here is numerically interchangeable and why none of them can
+    be chosen statically.
+
+    `_ORIGINAL_LEN` is deliberately LAST: kernel_select verifies candidates
+    against the final entry (`_contest`'s `reference_name = candidates[-1]`),
+    and the unpadded transform is the behaviour this function is required to
+    preserve, so it is the thing compared *to*. Verification runs at
+    `fftconv_tolerance`'s looser fftconv bar rather than kernel_select's
+    dtype defaults: a different transform length rounds differently, so the
+    padded variants are close to the reference but not bit-identical to it,
+    which is exactly the case that bar exists for.
+
+    Hands straight back to the unpadded path -- building no thunks and
+    touching no cache -- when the contest is off, when every policy is a
+    no-op for these extents (all axes already smooth, the common case for
+    power-of-2 workloads), or when the signal is small enough that the
+    contest would cost more than it could ever recover."""
+    if not (_FFTCONV_SMOOTH_LEN and kernel_select.enabled()):
+        return run(base_sizes)
+    # A gradient-carrying call must not be routed through the contest: it
+    # would run the convolution several times to time it, building (and
+    # discarding) a graph per candidate. Correct, but pointless work.
+    if torch.is_grad_enabled() and any(
+        t is not None and t.requires_grad for t in (signal, kernel)
+    ):
+        return run(base_sizes)
+    if _positions(base_sizes) < _FFTCONV_SMOOTH_MIN_POSITIONS:
+        return run(base_sizes)
+
+    sizes = {}
+    for name, radices in _SMOOTH_POLICIES:
+        cand = _smooth_sizes(base_sizes, radices)
+        if cand != base_sizes and cand not in sizes.values():
+            sizes[name] = cand
+    if not sizes:
+        return run(base_sizes)  # already smooth on every axis; nothing to try
+
+    key = (signal.dtype, tuple(signal.shape), tuple(kernel.shape),
+           groups, tuple(stride_), tuple(base_sizes))
+
+    won = kernel_select.cached_key("fftconv_len", key)
+    if won is not None:
+        return run(sizes.get(won, base_sizes))
+
+    candidates = [(n, (lambda sz=sz: run(sz))) for n, sz in sizes.items()]
+    candidates.append((_ORIGINAL_LEN, lambda: run(base_sizes)))
+    out = kernel_select.pick_key("fftconv_len", key, candidates,
+                                  tolerance=fftconv_tolerance(signal.dtype))
+    return out if out is not None else run(base_sizes)
+
+
 def fft_conv(
     signal: Tensor,
     kernel: Tensor,
@@ -439,42 +668,82 @@ def fft_conv(
     signal = F.pad(signal, signal_padding, mode=padding_mode)
 
     signal_size = signal.size()
+
+    # --- A kernel wider than the (already padded, already dilation-expanded)
+    # signal has no valid output position at all. Everything below would
+    # still "work" -- F.pad accepts the negative pad it implies and silently
+    # TRUNCATES the kernel, and the crop's `signal_size - kernel + 1` goes
+    # <= 0 and slices to empty -- so the call used to return a wrongly-shaped
+    # tensor computed from a mutilated kernel instead of failing. F.convNd
+    # rejects this outright; so does this now, with the same complaint.
+    invalid = [
+        (i - 2, int(signal_size[i]), kernel.size(i))
+        for i in range(2, signal.ndim)
+        if kernel.size(i) > signal_size[i]
+    ]
+    if invalid:
+        got = " x ".join(str(int(signal_size[i])) for i in range(2, signal.ndim))
+        want = " x ".join(str(kernel.size(i)) for i in range(2, signal.ndim))
+        raise ValueError(
+            f"Calculated padded input size per channel: ({got}). "
+            f"Kernel size: ({want}). Kernel size can't be greater than "
+            f"actual input size (axis {invalid[0][0]})."
+        )
+
     if signal.size(-1) % 2 != 0:
         signal = F.pad(signal, [0, 1])
 
-    kernel_padding = [
-        pad
-        for i in reversed(range(2, signal.ndim))
-        for pad in [0, signal.size(i) - kernel.size(i)]
-    ]
-    padded_kernel = F.pad(kernel, kernel_padding)
+    # --- Transform extents. `_ORIGINAL_LEN` is what this function has always
+    # used (the signal as padded above); the smooth-length policies enlarge it
+    # further. See the TRANSFORM-LENGTH PADDING comment for why enlarging is
+    # semantically free and why the choice is measured rather than fixed.
+    base_sizes = tuple(signal.size(i) for i in range(2, signal.ndim))
 
-    # --- fp32 transform + pointwise multiply: the only part of this
-    # function where precision actually matters, and the only part
-    # torch.fft requires it for regardless of `signal`'s own dtype.
-    signal_fr = rfftn(signal.float(), dim=tuple(range(2, signal.ndim)))
-    kernel_fr = rfftn(padded_kernel.float(), dim=tuple(range(2, signal.ndim)))
+    def _run(fft_sizes: Tuple[int, ...]) -> Tensor:
+        sig = signal
+        if fft_sizes != base_sizes:
+            grow = [
+                pad
+                for i in reversed(range(len(fft_sizes)))
+                for pad in [0, fft_sizes[i] - base_sizes[i]]
+            ]
+            sig = F.pad(sig, grow)
 
-    kernel_fr.imag *= -1
-    output_fr = complex_matmul(signal_fr, kernel_fr, groups=groups)
-    output = irfftn(output_fr, dim=tuple(range(2, signal.ndim)))
+        kernel_padding = [
+            pad
+            for i in reversed(range(2, sig.ndim))
+            for pad in [0, sig.size(i) - kernel.size(i)]
+        ]
+        padded_kernel = F.pad(kernel, kernel_padding)
 
-    # --- back to fp16/bf16 storage immediately: the crop and bias-add
-    # below are again pure data movement over what's now an
-    # activation-sized tensor, not a reason to keep paying for float32.
-    output = output.to(out_dtype)
+        # --- fp32 transform + pointwise multiply: the only part of this
+        # function where precision actually matters, and the only part
+        # torch.fft requires it for regardless of `signal`'s own dtype.
+        signal_fr = rfftn(sig.float(), dim=tuple(range(2, sig.ndim)))
+        kernel_fr = rfftn(padded_kernel.float(), dim=tuple(range(2, sig.ndim)))
 
-    crop_slices = (slice(None), slice(None)) + tuple(
-        slice(0, (signal_size[i] - kernel.size(i) + 1), stride_[i - 2])
-        for i in range(2, signal.ndim)
-    )
-    output = output[crop_slices].contiguous()
+        kernel_fr.imag *= -1
+        output_fr = complex_matmul(signal_fr, kernel_fr, groups=groups)
+        out = irfftn(output_fr, dim=tuple(range(2, sig.ndim)))
 
-    if bias is not None:
-        bias_shape = tuple([1, -1] + (signal.ndim - 2) * [1])
-        output = output + bias.to(out_dtype).view(bias_shape)
+        # --- back to fp16/bf16 storage immediately: the crop and bias-add
+        # below are again pure data movement over what's now an
+        # activation-sized tensor, not a reason to keep paying for float32.
+        out = out.to(out_dtype)
 
-    return output
+        crop_slices = (slice(None), slice(None)) + tuple(
+            slice(0, (signal_size[i] - kernel.size(i) + 1), stride_[i - 2])
+            for i in range(2, sig.ndim)
+        )
+        out = out[crop_slices].contiguous()
+
+        if bias is not None:
+            bias_shape = tuple([1, -1] + (sig.ndim - 2) * [1])
+            out = out + bias.to(out_dtype).view(bias_shape)
+
+        return out
+
+    return _length_contest(_run, signal, kernel, base_sizes, groups, stride_)
 
 
 def fft_conv1d(signal: Tensor, kernel: Tensor, bias: Optional[Tensor] = None,
@@ -508,6 +777,43 @@ def fft_conv3d(signal: Tensor, kernel: Tensor, bias: Optional[Tensor] = None,
     """F.conv3d-equivalent via FFT. `signal` [B,Ci,D,H,W], `kernel` [Co,Ci/groups,Kd,Kh,Kw]."""
     if signal.dim() != 5 or kernel.dim() != 5:
         raise ValueError("fft_conv3d expects 5D [B,C,D,H,W] signal and kernel tensors.")
+    return fft_conv(signal, kernel, bias=bias, padding=padding, padding_mode=padding_mode,
+                     stride=stride, dilation=dilation, groups=groups)
+
+
+def fft_convnd(signal: Tensor, kernel: Tensor, bias: Optional[Tensor] = None,
+                padding: Union[int, Iterable[int], str] = 0, padding_mode: str = "constant",
+                stride: Union[int, Iterable[int]] = 1, dilation: Union[int, Iterable[int]] = 1,
+                groups: int = 1) -> Tensor:
+    """F.convNd-equivalent via FFT for ANY number of spatial axes -- `signal`
+    [B,Ci,*spatial], `kernel` [Co,Ci/groups,*kernel_spatial], N inferred as
+    `signal.dim() - 2`.
+
+    `fft_conv` was always rank-generic; what did not exist was a public entry
+    point saying so. The fixed-rank `fft_conv1d`/`2d`/`3d` above stay as they
+    are -- their strict 3D/4D/5D checks are a deliberate F.convNd-shaped
+    contract, and catching a misranked tensor at the call site beats letting
+    it become a differently-misranked one four frames down -- but they cover
+    only the ranks torch itself has a conv for. This covers the rest, which
+    for an FFT convolution costs nothing extra: there is no direct-convolution
+    kernel behind it whose absence would be the real limit, just an rfftn over
+    however many axes were handed over (verified against a 4-spatial-axis
+    conv, which `F.conv4d` does not exist to check against).
+
+    Requires at least one spatial axis, the one thing `fft_conv` genuinely
+    cannot do -- a rank-2 [B,C] input leaves rfftn no axis to transform and
+    fails inside torch.fft with a message about the transform rather than
+    about the argument."""
+    if signal.dim() < 3:
+        raise ValueError(
+            f"fft_convnd expects a [B,C,*spatial] signal with at least one "
+            f"spatial axis, got a {signal.dim()}D tensor."
+        )
+    if kernel.dim() != signal.dim():
+        raise ValueError(
+            f"fft_convnd expects signal and kernel of equal rank, got "
+            f"{signal.dim()}D signal and {kernel.dim()}D kernel."
+        )
     return fft_conv(signal, kernel, bias=bias, padding=padding, padding_mode=padding_mode,
                      stride=stride, dilation=dilation, groups=groups)
 
@@ -603,11 +909,35 @@ def fftconv1d_candidate(input: Tensor, weight: Tensor, bias: Optional[Tensor],
     padding string)."""
     if input.dim() != 3 or weight.dim() != 3:
         return None
-    if weight.shape[-1] < _FFTCONV1D_MIN_KERNEL:
+    return fftconv_candidate(input, weight, bias, stride, padding, dilation, groups)
+
+
+def fftconv_candidate(input: Tensor, weight: Tensor, bias: Optional[Tensor],
+                       stride, padding, dilation, groups: int) -> Optional[Tensor]:
+    """Rank-generic `fftconv1d_candidate`: same decline-don't-raise contract,
+    for a conv of any spatial rank rather than 1D only.
+
+    `fftconv1d_candidate` above is the conv1d auto-patch's entry point and
+    keeps its own 3D check (miopen_fallback hands it conv1d tensors and a
+    scalar stride/padding/dilation, and a candidate that quietly accepted a
+    4D tensor there would be papering over a caller bug); this is what a
+    caller with a conv2d/conv3d/N-D shape contests with. `stride`/`padding`/
+    `dilation` may be scalars or per-axis sequences -- `fft_conv` runs them
+    through `to_ntuple` either way.
+
+    None if the ranks disagree, if the kernel is below
+    AMD_TUNED_TORCH_FFTCONV1D_MIN_KERNEL on every spatial axis (the same
+    cheap pre-filter, applied to the widest axis so an asymmetric kernel
+    like 1x64 is not dismissed for its narrow one), or if the call fails
+    for any reason -- including the kernel-wider-than-input case `fft_conv`
+    now rejects outright."""
+    if input.dim() < 3 or weight.dim() != input.dim():
+        return None
+    if max(weight.shape[2:]) < _FFTCONV1D_MIN_KERNEL:
         return None
     try:
-        return fft_conv1d(input, weight, bias=bias, padding=padding,
-                           stride=stride, dilation=dilation, groups=groups)
+        return fft_conv(input, weight, bias=bias, padding=padding,
+                         stride=stride, dilation=dilation, groups=groups)
     except (RuntimeError, ValueError, TypeError):
         return None
 
@@ -636,15 +966,40 @@ def maybe_fft_conv1d(input: Tensor, weight: Tensor, bias: Optional[Tensor] = Non
     None when AMD_TUNED_TORCH_FFTCONV1D=0 (fft_conv1d_enabled() is False),
     `weight`'s kernel width is below `min_kernel`, or the call fails for
     any reason (e.g. an unsupported padding_mode/padding string)."""
-    if not fft_conv1d_enabled():
-        return None
     if input.dim() != 3 or weight.dim() != 3:
         return None
+    return maybe_fft_conv(input, weight, bias=bias, stride=stride, padding=padding,
+                           dilation=dilation, groups=groups, min_kernel=min_kernel)
+
+
+def maybe_fft_conv(input: Tensor, weight: Tensor, bias: Optional[Tensor] = None,
+                    stride: Tuple[int, ...] = (1,), padding: Tuple[int, ...] = (0,),
+                    dilation: Tuple[int, ...] = (1,), groups: int = 1,
+                    min_kernel: Optional[int] = None) -> Optional[Tensor]:
+    """Rank-generic `maybe_fft_conv1d` -- same static `min_kernel` heuristic
+    and same None-on-decline contract, for a conv of any spatial rank.
+
+    The threshold is compared against the WIDEST spatial axis of `weight`,
+    not the last one: for a 1D kernel those are the same axis, and for a 2D/
+    3D kernel the widest is the one that decides whether FFT-conv's O(N log N)
+    argument has anything to work with. Note the default of 128 is 1D's
+    crossover -- 2D and 3D cross over much earlier (see
+    `_FFTCONV_CONV2D_MIN_KERNEL`=32 / `_FFTCONV_CONV3D_MIN_KERNEL`=7 in
+    __init__.py, both measured on gfx1100), so a 2D/3D caller relying on this
+    function's static route rather than a measured contest should pass its
+    own `min_kernel` rather than inherit 1D's.
+
+    `stride`/`padding`/`dilation` are per-axis sequences here, matching
+    F.convNd's own normalised form; a scalar works too."""
+    if not fft_conv1d_enabled():
+        return None
+    if input.dim() < 3 or weight.dim() != input.dim():
+        return None
     threshold = 128 if min_kernel is None else min_kernel
-    if weight.shape[-1] < threshold:
+    if max(weight.shape[2:]) < threshold:
         return None
     try:
-        return fft_conv1d(input, weight, bias=bias, padding=padding[0],
-                           stride=stride[0], dilation=dilation[0], groups=groups)
+        return fft_conv(input, weight, bias=bias, padding=padding,
+                         stride=stride, dilation=dilation, groups=groups)
     except (RuntimeError, ValueError, TypeError):
         return None

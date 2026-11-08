@@ -1,0 +1,239 @@
+te_ops      : /home/wiffzack/optimiert/amd_tools/source/cmp_ext_turing/amd_tuned_torch/te_ops.py
+torch       : 2.15.0.dev20260920+rocm7.14  (hip 7.14.60850)
+device      : AMD Radeon RX 7900 XTX
+NVTE_DISABLE_NVRTC=1
+
+==============================================================================
+FP16
+==============================================================================
+
+LayerNorm  [4096x4096]
+  fwd      stock    0.082 ms   te_ops    0.063 ms   speedup   1.30x
+  fwd+bwd  stock    0.236 ms   te_ops    0.213 ms   speedup   1.11x   [FASTER]
+  numerics max|TE-stock| out 3.91e-03  grads [3.91e-03, 1.56e-02, 2.44e-04]   (stock's own fp32 error: 6.24e-02)
+
+RMSNorm  [4096x4096]
+  fwd      stock    0.065 ms   te_ops    0.058 ms   speedup   1.13x
+  fwd+bwd  stock    0.302 ms   te_ops    0.224 ms   speedup   1.35x   [FASTER]
+  numerics max|TE-stock| out 7.81e-03  grads [7.81e-03, 1.25e-01]   (stock's own fp32 error: 6.20e-02)
+
+LayerNorm  [16384x2048]
+  fwd      stock    0.168 ms   te_ops    0.182 ms   speedup   0.92x
+  fwd+bwd  stock    0.686 ms   te_ops    0.563 ms   speedup   1.22x   [FASTER]
+  numerics max|TE-stock| out 3.91e-03  grads [7.81e-03, 6.25e-02, 6.10e-05]   (stock's own fp32 error: 1.23e-01)
+
+RMSNorm  [16384x2048]
+  fwd      stock    0.182 ms   te_ops    0.182 ms   speedup   1.00x
+  fwd+bwd  stock    0.639 ms   te_ops    0.457 ms   speedup   1.40x   [FASTER]
+  numerics max|TE-stock| out 7.81e-03  grads [1.56e-02, 2.50e-01]   (stock's own fp32 error: 1.25e-01)
+
+GELU (tanh)  [8192x4096]
+  fwd      stock    0.166 ms   te_ops    0.343 ms   speedup   0.48x
+  fwd+bwd  stock    0.414 ms   te_ops    0.499 ms   speedup   0.83x   [slower]
+  numerics max|TE-stock| out 6.10e-05  grads [3.91e-03]   (stock's own fp32 error: 1.95e-03)
+
+SiLU  [8192x4096]
+  fwd      stock    0.166 ms   te_ops    0.303 ms   speedup   0.55x
+  fwd+bwd  stock    0.414 ms   te_ops    0.462 ms   speedup   0.90x   [slower]
+  numerics max|TE-stock| out 1.22e-04  grads [1.95e-03]   (stock's own fp32 error: 1.95e-03)
+
+Attention causal  [B2 H16 S1024 D64]
+  fwd      stock    0.258 ms   te_ops    0.676 ms   speedup   0.38x
+  fwd+bwd  stock    0.631 ms   te_ops    1.598 ms   speedup   0.39x   [slower]
+  numerics max|TE-stock| out 1.95e-03  grads [1.95e-03, 3.91e-03, 1.95e-03]   (stock's own fp32 error: 2.04e-03)
+
+Attention no_mask  [B2 H16 S1024 D64]
+  fwd      stock    0.235 ms   te_ops    0.677 ms   speedup   0.35x
+  fwd+bwd  stock    0.889 ms   te_ops    1.565 ms   speedup   0.57x   [slower]
+  numerics max|TE-stock| out 7.32e-04  grads [9.77e-04, 9.77e-04, 5.49e-04]   (stock's own fp32 error: 3.01e-04)
+
+Attention br-causal mask  [B2 H16 S1024 D64]
+  fwd      stock    0.484 ms   te_ops    0.700 ms   speedup   0.69x
+  fwd+bwd  stock    1.858 ms   te_ops    1.595 ms   speedup   1.17x   [FASTER]
+  numerics max|TE-stock| out 1.95e-03  grads [1.95e-03, 3.91e-03, 1.95e-03]   (stock's own fp32 error: 2.04e-03)
+
+Attention causal  [B2 H32 S2048 D128]
+  fwd      stock    1.617 ms   te_ops    6.723 ms   speedup   0.24x
+  fwd+bwd  stock    9.758 ms   te_ops   15.114 ms   speedup   0.65x   [slower]
+  numerics max|TE-stock| out 1.95e-03  grads [3.91e-03, 1.95e-03, 3.91e-03]   (stock's own fp32 error: 2.69e-03)
+
+Attention no_mask  [B2 H32 S2048 D128]
+  fwd      stock    2.124 ms   te_ops    6.747 ms   speedup   0.31x
+  fwd+bwd  stock   16.530 ms   te_ops   15.204 ms   speedup   1.09x   [FASTER]
+  numerics max|TE-stock| out 3.66e-04  grads [7.32e-04, 7.32e-04, 4.88e-04]   (stock's own fp32 error: 3.36e-04)
+
+Attention br-causal mask  [B2 H32 S2048 D128]
+  fwd      stock    2.513 ms   te_ops    6.805 ms   speedup   0.37x
+  fwd+bwd  stock   23.793 ms   te_ops   15.215 ms   speedup   1.56x   [FASTER]
+  numerics max|TE-stock| out 1.95e-03  grads [3.91e-03, 1.95e-03, 3.91e-03]   (stock's own fp32 error: 2.69e-03)
+
+==============================================================================
+BF16
+==============================================================================
+
+LayerNorm  [4096x4096]
+  fwd      stock    0.046 ms   te_ops    0.055 ms   speedup   0.84x
+  fwd+bwd  stock    0.256 ms   te_ops    0.266 ms   speedup   0.96x   [slower]
+  numerics max|TE-stock| out 1.56e-02  grads [1.56e-02, 0.00e+00, 0.00e+00]   (stock's own fp32 error: 4.99e-01)
+
+RMSNorm  [4096x4096]
+  fwd      stock    0.046 ms   te_ops    0.052 ms   speedup   0.88x
+  fwd+bwd  stock    0.234 ms   te_ops    0.293 ms   speedup   0.80x   [slower]
+  numerics max|TE-stock| out 6.25e-02  grads [6.25e-02, 1.00e+00]   (stock's own fp32 error: 4.98e-01)
+
+LayerNorm  [16384x2048]
+  fwd      stock    0.168 ms   te_ops    0.203 ms   speedup   0.83x
+  fwd+bwd  stock    0.666 ms   te_ops    0.591 ms   speedup   1.13x   [FASTER]
+  numerics max|TE-stock| out 3.12e-02  grads [3.12e-02, 3.91e-03, 0.00e+00]   (stock's own fp32 error: 9.99e-01)
+
+RMSNorm  [16384x2048]
+  fwd      stock    0.183 ms   te_ops    0.182 ms   speedup   1.01x
+  fwd+bwd  stock    0.654 ms   te_ops    0.468 ms   speedup   1.40x   [FASTER]
+  numerics max|TE-stock| out 6.25e-02  grads [1.25e-01, 2.00e+00]   (stock's own fp32 error: 9.97e-01)
+
+GELU (tanh)  [8192x4096]
+  fwd      stock    0.176 ms   te_ops    0.169 ms   speedup   1.04x
+  fwd+bwd  stock    0.418 ms   te_ops    0.422 ms   speedup   0.99x   [slower]
+  numerics max|TE-stock| out 1.53e-05  grads [3.12e-02]   (stock's own fp32 error: 1.56e-02)
+
+SiLU  [8192x4096]
+  fwd      stock    0.164 ms   te_ops    0.166 ms   speedup   0.99x
+  fwd+bwd  stock    0.416 ms   te_ops    0.424 ms   speedup   0.98x   [slower]
+  numerics max|TE-stock| out 0.00e+00  grads [3.91e-03]   (stock's own fp32 error: 1.56e-02)
+
+Attention causal  [B2 H16 S1024 D64]
+  fwd      stock    0.180 ms   te_ops    0.755 ms   speedup   0.24x
+  fwd+bwd  stock    0.660 ms   te_ops    1.640 ms   speedup   0.40x   [slower]
+  numerics max|TE-stock| out 1.56e-02  grads [1.56e-02, 1.56e-02, 1.56e-02]   (stock's own fp32 error: 1.45e-02)
+
+Attention no_mask  [B2 H16 S1024 D64]
+  fwd      stock    0.182 ms   te_ops    0.702 ms   speedup   0.26x
+  fwd+bwd  stock    0.910 ms   te_ops    1.625 ms   speedup   0.56x   [slower]
+  numerics max|TE-stock| out 3.91e-03  grads [5.86e-03, 7.81e-03, 5.86e-03]   (stock's own fp32 error: 2.76e-03)
+
+Attention br-causal mask  [B2 H16 S1024 D64]
+  fwd      stock    0.417 ms   te_ops    0.715 ms   speedup   0.58x
+  fwd+bwd  stock    1.670 ms   te_ops    1.639 ms   speedup   1.02x   [FASTER]
+  numerics max|TE-stock| out 1.56e-02  grads [1.56e-02, 1.56e-02, 1.56e-02]   (stock's own fp32 error: 1.45e-02)
+
+Attention causal  [B2 H32 S2048 D128]
+  fwd      stock    1.642 ms   te_ops    6.902 ms   speedup   0.24x
+  fwd+bwd  stock    9.870 ms   te_ops   15.189 ms   speedup   0.65x   [slower]
+  numerics max|TE-stock| out 1.56e-02  grads [1.56e-02, 2.34e-02, 3.12e-02]   (stock's own fp32 error: 2.09e-02)
+
+Attention no_mask  [B2 H32 S2048 D128]
+  fwd      stock    2.190 ms   te_ops    6.744 ms   speedup   0.32x
+  fwd+bwd  stock   16.704 ms   te_ops   15.108 ms   speedup   1.11x   [FASTER]
+  numerics max|TE-stock| out 3.91e-03  grads [7.81e-03, 9.77e-03, 3.91e-03]   (stock's own fp32 error: 3.56e-03)
+
+Attention br-causal mask  [B2 H32 S2048 D128]
+  fwd      stock    2.549 ms   te_ops    6.988 ms   speedup   0.36x
+  fwd+bwd  stock   22.655 ms   te_ops   15.287 ms   speedup   1.48x   [FASTER]
+  numerics max|TE-stock| out 1.56e-02  grads [1.56e-02, 2.34e-02, 3.12e-02]   (stock's own fp32 error: 2.09e-02)
+
+==============================================================================
+FP32
+==============================================================================
+
+LayerNorm  [4096x4096]
+  fwd      stock    0.190 ms   te_ops    0.206 ms   speedup   0.92x
+  fwd+bwd  stock    0.626 ms   te_ops    0.493 ms   speedup   1.27x   [FASTER]
+  numerics max|TE-stock| out 1.91e-06  grads [2.86e-06, 4.58e-05, 3.81e-05]   (stock's own fp32 error: 0.00e+00)
+
+RMSNorm  [4096x4096]
+  fwd      stock    0.187 ms   te_ops    0.196 ms   speedup   0.95x
+  fwd+bwd  stock    0.629 ms   te_ops    0.511 ms   speedup   1.23x   [FASTER]
+  numerics max|TE-stock| out 1.91e-06  grads [2.86e-06, 3.81e-05]   (stock's own fp32 error: 0.00e+00)
+
+LayerNorm  [16384x2048]
+  fwd      stock    0.327 ms   te_ops    0.362 ms   speedup   0.90x
+  fwd+bwd  stock    1.193 ms   te_ops    0.993 ms   speedup   1.20x   [FASTER]
+  numerics max|TE-stock| out 2.38e-06  grads [2.86e-06, 9.16e-05, 9.16e-05]   (stock's own fp32 error: 0.00e+00)
+
+RMSNorm  [16384x2048]
+  fwd      stock    0.359 ms   te_ops    0.358 ms   speedup   1.00x
+  fwd+bwd  stock    1.159 ms   te_ops    0.906 ms   speedup   1.28x   [FASTER]
+  numerics max|TE-stock| out 1.91e-06  grads [2.86e-06, 9.16e-05]   (stock's own fp32 error: 0.00e+00)
+
+GELU (tanh)  [8192x4096]
+  fwd      stock    0.347 ms   te_ops    0.329 ms   speedup   1.06x
+  fwd+bwd  stock    0.811 ms   te_ops    0.830 ms   speedup   0.98x   [slower]
+  numerics max|TE-stock| out 4.77e-07  grads [2.98e-06]   (stock's own fp32 error: 0.00e+00)
+
+SiLU  [8192x4096]
+  fwd      stock    0.326 ms   te_ops    0.331 ms   speedup   0.98x
+  fwd+bwd  stock    0.812 ms   te_ops    0.829 ms   speedup   0.98x   [slower]
+  numerics max|TE-stock| out 4.77e-07  grads [1.19e-06]   (stock's own fp32 error: 0.00e+00)
+
+Attention causal  [B2 H16 S1024 D64]
+  fwd      stock    1.273 ms   te_ops    4.646 ms   speedup   0.27x
+  fwd+bwd  stock    5.641 ms   te_ops   13.427 ms   speedup   0.42x   [slower]
+  numerics max|TE-stock| out 7.15e-07  grads [1.90e-06, 5.48e-06, 7.63e-06]   (stock's own fp32 error: 0.00e+00)
+
+Attention no_mask  [B2 H16 S1024 D64]
+  fwd      stock    1.894 ms   te_ops    4.285 ms   speedup   0.44x
+  fwd+bwd  stock    9.409 ms   te_ops   10.487 ms   speedup   0.90x   [slower]
+  numerics max|TE-stock| out 1.07e-06  grads [6.85e-07, 7.15e-07, 5.07e-07]   (stock's own fp32 error: 0.00e+00)
+
+Attention br-causal mask  [B2 H16 S1024 D64]
+  fwd      stock    2.069 ms   te_ops    4.664 ms   speedup   0.44x
+  fwd+bwd  stock   10.116 ms   te_ops   13.484 ms   speedup   0.75x   [slower]
+  numerics max|TE-stock| out 7.15e-07  grads [1.90e-06, 5.25e-06, 6.20e-06]   (stock's own fp32 error: 0.00e+00)
+
+Attention causal  [B2 H32 S2048 D128]
+  fwd      stock   21.799 ms   te_ops   39.602 ms   speedup   0.55x
+  fwd+bwd  stock   86.623 ms   te_ops  120.772 ms   speedup   0.72x   [slower]
+  numerics max|TE-stock| out 2.26e-06  grads [2.86e-06, 8.11e-06, 1.24e-05]   (stock's own fp32 error: 0.00e+00)
+
+Attention no_mask  [B2 H32 S2048 D128]
+  fwd      stock   39.384 ms   te_ops   37.142 ms   speedup   1.06x
+  fwd+bwd  stock  159.546 ms   te_ops   98.514 ms   speedup   1.62x   [FASTER]
+  numerics max|TE-stock| out 7.15e-07  grads [8.94e-07, 1.03e-06, 8.05e-07]   (stock's own fp32 error: 0.00e+00)
+
+Attention br-causal mask  [B2 H32 S2048 D128]
+  fwd      stock   40.457 ms   te_ops   39.719 ms   speedup   1.02x
+  fwd+bwd  stock  167.853 ms   te_ops  121.062 ms   speedup   1.39x   [FASTER]
+  numerics max|TE-stock| out 2.26e-06  grads [2.86e-06, 8.11e-06, 5.13e-06]   (stock's own fp32 error: 0.00e+00)
+
+==============================================================================
+SUMMARY  (speedup > 1.00 means te_ops beats stock PyTorch)
+==============================================================================
+op                         shape                       fwd   fwd+bwd    max err
+LayerNorm                  4096x4096                 1.30x     1.11x   1.56e-02
+RMSNorm                    4096x4096                 1.13x     1.35x   1.25e-01
+LayerNorm                  16384x2048                0.92x     1.22x   6.25e-02
+RMSNorm                    16384x2048                1.00x     1.40x   2.50e-01
+GELU (tanh)                8192x4096                 0.48x     0.83x   3.91e-03
+SiLU                       8192x4096                 0.55x     0.90x   1.95e-03
+Attention causal           B2 H16 S1024 D64          0.38x     0.39x   3.91e-03
+Attention no_mask          B2 H16 S1024 D64          0.35x     0.57x   9.77e-04
+Attention br-causal mask   B2 H16 S1024 D64          0.69x     1.17x   3.91e-03
+Attention causal           B2 H32 S2048 D128         0.24x     0.65x   3.91e-03
+Attention no_mask          B2 H32 S2048 D128         0.31x     1.09x   7.32e-04
+Attention br-causal mask   B2 H32 S2048 D128         0.37x     1.56x   3.91e-03
+LayerNorm                  4096x4096                 0.84x     0.96x   1.56e-02
+RMSNorm                    4096x4096                 0.88x     0.80x   1.00e+00
+LayerNorm                  16384x2048                0.83x     1.13x   3.12e-02
+RMSNorm                    16384x2048                1.01x     1.40x   2.00e+00
+GELU (tanh)                8192x4096                 1.04x     0.99x   3.12e-02
+SiLU                       8192x4096                 0.99x     0.98x   3.91e-03
+Attention causal           B2 H16 S1024 D64          0.24x     0.40x   1.56e-02
+Attention no_mask          B2 H16 S1024 D64          0.26x     0.56x   7.81e-03
+Attention br-causal mask   B2 H16 S1024 D64          0.58x     1.02x   1.56e-02
+Attention causal           B2 H32 S2048 D128         0.24x     0.65x   3.12e-02
+Attention no_mask          B2 H32 S2048 D128         0.32x     1.11x   9.77e-03
+Attention br-causal mask   B2 H32 S2048 D128         0.36x     1.48x   3.12e-02
+LayerNorm                  4096x4096                 0.92x     1.27x   4.58e-05
+RMSNorm                    4096x4096                 0.95x     1.23x   3.81e-05
+LayerNorm                  16384x2048                0.90x     1.20x   9.16e-05
+RMSNorm                    16384x2048                1.00x     1.28x   9.16e-05
+GELU (tanh)                8192x4096                 1.06x     0.98x   2.98e-06
+SiLU                       8192x4096                 0.98x     0.98x   1.19e-06
+Attention causal           B2 H16 S1024 D64          0.27x     0.42x   7.63e-06
+Attention no_mask          B2 H16 S1024 D64          0.44x     0.90x   1.07e-06
+Attention br-causal mask   B2 H16 S1024 D64          0.44x     0.75x   6.20e-06
+Attention causal           B2 H32 S2048 D128         0.55x     0.72x   1.24e-05
+Attention no_mask          B2 H32 S2048 D128         1.06x     1.62x   1.03e-06
+Attention br-causal mask   B2 H32 S2048 D128         1.02x     1.39x   8.11e-06
+
+median speedup: fwd 0.76x, fwd+bwd 1.00x
